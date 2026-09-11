@@ -13,6 +13,7 @@
 import { tableFromIPC } from 'apache-arrow';
 import * as chart from './chart.js';
 import { drawShape } from './drawing.js';
+import * as pane from './pane.js';
 
 const JETSON_BASE_URL = process.env.JETSON_BASE_URL || 'http://10.10.10.1:8769';
 const REQUEST_TIMEOUT_MS = 5000;
@@ -898,6 +899,64 @@ export async function annotateConfluenceBadge({ pair: pairArg, draw = true, _dep
   } catch (err) {
     return { success: true, pair, chart_symbol: chartSymbol, drawn: false, error: err.message, confluence };
   }
+}
+
+/**
+ * Draws a confluence badge on EVERY pane in the current multi-pane layout,
+ * not just the active one — "the other pairs" in a grid layout, not just
+ * whatever's focused. drawShape always targets whichever pane is currently
+ * focused (there is no per-pane draw target), so this focuses each pane in
+ * turn via pane_focus, reuses annotateConfluenceBadge for that pane's own
+ * symbol, and restores whichever pane was originally active when done —
+ * annotating other panes shouldn't leave the user's active pane changed as
+ * a side effect. Panes on a non-FX symbol are skipped and reported, not
+ * silently dropped from the result.
+ */
+export async function annotateConfluenceBadgesAllPanes({ draw = true, _deps } = {}) {
+  const paneState = await pane.list({ _deps });
+  if (!paneState.panes || paneState.panes.length < 2) {
+    return {
+      success: true,
+      drawn: false,
+      reason: `Only ${paneState.panes?.length ?? 0} pane(s) in the current layout ("${paneState.layout_name}") — nothing to annotate across other pairs. Use pane_set_layout for a multi-pane grid first.`,
+      panes: paneState.panes,
+    };
+  }
+
+  const originalActive = paneState.active_index;
+  const results = [];
+
+  for (const p of paneState.panes) {
+    if (p.error) {
+      results.push({ index: p.index, drawn: false, reason: `Could not read this pane's symbol: ${p.error}` });
+      continue;
+    }
+    const pair = extractFxPair(p.symbol);
+    if (!pair) {
+      results.push({ index: p.index, symbol: p.symbol, drawn: false, reason: `Symbol "${p.symbol}" doesn't look like an FX pair — skipped.` });
+      continue;
+    }
+    try {
+      await pane.focus({ index: p.index, _deps });
+      const badge = await annotateConfluenceBadge({ pair, draw, _deps });
+      results.push({ index: p.index, symbol: p.symbol, ...badge });
+    } catch (err) {
+      results.push({ index: p.index, symbol: p.symbol, pair, drawn: false, error: err.message });
+    }
+  }
+
+  if (originalActive != null) {
+    try { await pane.focus({ index: originalActive, _deps }); } catch { /* best-effort restore only */ }
+  }
+
+  return {
+    success: true,
+    drawn: results.some((r) => r.drawn),
+    panes_annotated: results.filter((r) => r.drawn).length,
+    panes_skipped: results.filter((r) => !r.drawn).length,
+    restored_active_index: originalActive,
+    results,
+  };
 }
 
 // ---------------------------------------------------------------------------
