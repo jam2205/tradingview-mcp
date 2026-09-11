@@ -181,6 +181,87 @@ export async function getOhlcv({ count, summary } = {}) {
   return { success: true, bar_count: data.bars.length, total_available: data.total_bars, source: data.source, bars: data.bars };
 }
 
+/**
+ * Finds local swing highs/lows over the chart's recent OHLCV history — an
+ * N-bar fractal: a bar's high (or low) is strictly more extreme than every
+ * other bar within `window` bars on both sides. Returns the exact bar
+ * time+price for each swing so a caller can anchor its own draw_shape text
+ * annotation precisely, instead of having to scan raw bars itself just to
+ * find where "the swing high" actually was — this tool only finds WHERE,
+ * the caller supplies its own narrative for WHAT to say there.
+ *
+ * `time` comes back in the same units as draw_shape's point.time (this
+ * chart's native bar time) — no unit conversion needed before drawing.
+ *
+ * Takes its own _deps (rather than reusing getOhlcv's non-DI-aware
+ * evaluate) so it's independently testable without touching getOhlcv's
+ * existing, heavily-used contract.
+ */
+export async function findSwingPoints({ count, window, _deps } = {}) {
+  const ev = _deps?.evaluate || evaluate;
+  const w = Math.max(1, Math.min(Number(window) || 5, 50));
+  const limit = Math.min(count || 300, MAX_OHLCV_BARS);
+
+  let data;
+  try {
+    data = await ev(`
+      (function() {
+        var bars = ${BARS_PATH};
+        if (!bars || typeof bars.lastIndex !== 'function') return null;
+        var result = [];
+        var end = bars.lastIndex();
+        var start = Math.max(bars.firstIndex(), end - ${limit} + 1);
+        for (var i = start; i <= end; i++) {
+          var v = bars.valueAt(i);
+          if (v) result.push({time: v[0], open: v[1], high: v[2], low: v[3], close: v[4], volume: v[5] || 0});
+        }
+        return {bars: result};
+      })()
+    `);
+  } catch { data = null; }
+
+  if (!data || !data.bars || data.bars.length === 0) {
+    throw new Error('Could not extract OHLCV data. The chart may still be loading.');
+  }
+
+  const bars = data.bars;
+  if (bars.length < w * 2 + 1) {
+    return {
+      success: true,
+      window: w,
+      bar_count: bars.length,
+      swing_count: 0,
+      swings: [],
+      note: `Not enough bars (${bars.length}) for a ${w}-bar window on both sides — try a smaller window or request more history.`,
+    };
+  }
+
+  const swings = [];
+  for (let i = w; i < bars.length - w; i++) {
+    const pivotHigh = bars[i].high;
+    const pivotLow = bars[i].low;
+    let isHigh = true;
+    let isLow = true;
+    for (let j = i - w; j <= i + w; j++) {
+      if (j === i) continue;
+      if (isHigh && bars[j].high >= pivotHigh) isHigh = false;
+      if (isLow && bars[j].low <= pivotLow) isLow = false;
+      if (!isHigh && !isLow) break;
+    }
+    if (isHigh) swings.push({ type: 'swing_high', bar_index: i, time: bars[i].time, price: roundPrice(pivotHigh) });
+    if (isLow) swings.push({ type: 'swing_low', bar_index: i, time: bars[i].time, price: roundPrice(pivotLow) });
+  }
+
+  return {
+    success: true,
+    window: w,
+    bar_count: bars.length,
+    swing_count: swings.length,
+    swings,
+    note: "time is in this chart's native bar-time units (same as draw_shape's point.time) — use these coordinates directly to anchor your own text annotation at this exact bar; this tool only finds WHERE, write your own narrative for WHAT to say.",
+  };
+}
+
 export async function getIndicator({ entity_id }) {
   const data = await evaluate(`
     (function() {

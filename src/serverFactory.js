@@ -39,6 +39,7 @@ Reading your chart:
 - data_get_study_values → get current numeric values from ALL visible indicators (RSI, MACD, BB, EMA, etc.)
 - quote_get → get real-time price snapshot (last, OHLC, volume)
 - data_get_ohlcv → get price bars. ALWAYS pass summary=true unless you need individual bars
+- data_find_swing_points → find exact swing high/low coordinates (bar time+price) so you don't have to scan raw bars yourself. To place your own narrated "popup" at a specific candle (e.g. "this was the session high before the reversal"): call this to get the coordinate, write the text yourself, then draw_shape (shape: "text", point: {time, price}) — the finder only locates WHERE, you supply WHAT it says
 
 Reading custom Pine indicator output (line.new/label.new/table.new/box.new drawings):
 - data_get_pine_lines → horizontal price levels from custom indicators (deduplicated, sorted)
