@@ -11,6 +11,14 @@ export function registerDataTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
+  server.tool('data_find_swing_points', 'Find local swing highs/lows over the chart\'s recent OHLCV history (N-bar fractal: a bar\'s high/low is more extreme than every bar within `window` bars on both sides). Returns exact bar time+price for each swing so you can anchor your own draw_shape text annotation precisely — use this before placing a note "at the swing high" instead of guessing or scanning raw bars yourself. This tool only finds WHERE the swing points are; write your own narrative for what the annotation says.', {
+    count: z.coerce.number().optional().describe('Bars of history to search (default 300, max 500)'),
+    window: z.coerce.number().optional().describe('Bars required on each side for a swing to qualify (default 5). Larger window = fewer, more significant swings; smaller = more, noisier ones.'),
+  }, async ({ count, window }) => {
+    try { return jsonResult(await core.findSwingPoints({ count, window })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
   server.tool('data_get_indicator', 'Get indicator/study info and input values', {
     entity_id: z.string().describe('Study entity ID (from chart_get_state)'),
   }, async ({ entity_id }) => {
