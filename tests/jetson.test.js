@@ -165,3 +165,63 @@ describe('jetson core — getSynthesizedContext()', () => {
     assert.equal(bad.error, 'boom');
   });
 });
+
+describe('jetson core — correlateChart()', () => {
+  function mockChartState(symbol, resolution) {
+    return { _deps: { evaluate: async () => ({ symbol, resolution, chartType: 1, studies: [] }) } };
+  }
+
+  beforeEach(() => {
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('/v1/arrow/live_bars/pairs')) return jsonResponse({ pairs: ['EURUSD', 'GBPUSD'], timeframes: ['1M', '5M', '15M', '1H'], file_age_seconds: {} });
+      if (String(url).includes('/v1/arrow/live_bars')) return arrowResponse(makeBarsTable({ count: 30 }));
+      return jsonResponse({}, false, 404);
+    };
+  });
+  afterEach(() => { globalThis.fetch = originalFetch; });
+
+  it('maps a broker-prefixed FX symbol and a covered resolution, then returns synthesized context', async () => {
+    const result = await jetson.correlateChart(mockChartState('OANDA:EURUSD', '15'));
+    assert.equal(result.mapped_pair, 'EURUSD');
+    assert.equal(result.mapped_tf, '15M');
+    assert.equal(result.correlated, true);
+    assert.equal(result.jetson.pair, 'EURUSD');
+    assert.ok(result.jetson.regime);
+  });
+
+  it('strips a slash-separated broker symbol the same way', async () => {
+    const result = await jetson.correlateChart(mockChartState('FX_IDC:EUR/USD', '60'));
+    assert.equal(result.mapped_pair, 'EURUSD');
+    assert.equal(result.mapped_tf, '1H');
+    assert.equal(result.correlated, true);
+  });
+
+  it('reports no correlation for a non-FX symbol without guessing', async () => {
+    const result = await jetson.correlateChart(mockChartState('BATS:AAPL', '15'));
+    assert.equal(result.mapped_pair, null);
+    assert.equal(result.correlated, false);
+    assert.match(result.reason, /doesn't look like an FX pair/);
+  });
+
+  it('reports no correlation for a resolution Jetson does not cover, without guessing a nearest match', async () => {
+    const result = await jetson.correlateChart(mockChartState('OANDA:EURUSD', 'D'));
+    assert.equal(result.mapped_pair, 'EURUSD');
+    assert.equal(result.mapped_tf, null);
+    assert.equal(result.correlated, false);
+    assert.deepEqual(result.available_jetson_timeframes, ['1M', '5M', '15M', '1H']);
+  });
+
+  it('an explicit tf override works even on an uncovered resolution', async () => {
+    const result = await jetson.correlateChart({ tf: '15M', ...mockChartState('OANDA:EURUSD', 'D') });
+    assert.equal(result.mapped_tf, '15M');
+    assert.equal(result.correlated, true);
+  });
+
+  it('reports no correlation when the mapped pair is not currently live', async () => {
+    const result = await jetson.correlateChart(mockChartState('OANDA:USDCHF', '15'));
+    assert.equal(result.mapped_pair, 'USDCHF');
+    assert.equal(result.correlated, false);
+    assert.match(result.reason, /isn't currently streaming/);
+    assert.deepEqual(result.jetson_live_pairs, ['EURUSD', 'GBPUSD']);
+  });
+});

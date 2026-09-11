@@ -11,11 +11,34 @@
  * raw bar arrays it would otherwise have to reason over token-by-token.
  */
 import { tableFromIPC } from 'apache-arrow';
+import * as chart from './chart.js';
 
 const JETSON_BASE_URL = process.env.JETSON_BASE_URL || 'http://10.10.10.1:8769';
 const REQUEST_TIMEOUT_MS = 5000;
 const MAX_LIVE_BARS = 500;
 const MAX_SYNTH_PAIRS = 10;
+
+// TradingView symbols carry a broker/exchange prefix ("OANDA:EURUSD",
+// "FX_IDC:EUR/USD", "BATS:AAPL") the Jetson feed knows nothing about — it
+// only speaks plain 6-letter FX pairs ("EURUSD"). This strips the prefix and
+// any separator, and returns null for anything that isn't shaped like an FX
+// pair (equities, futures, crypto) rather than guessing.
+const FX_PAIR_RE = /^[A-Z]{6}$/;
+function extractFxPair(symbol) {
+  if (!symbol) return null;
+  const afterColon = symbol.includes(':') ? symbol.split(':').pop() : symbol;
+  const cleaned = afterColon.replace(/[^A-Za-z]/g, '').toUpperCase();
+  return FX_PAIR_RE.test(cleaned) ? cleaned : null;
+}
+
+// TradingView chart resolutions ("1", "5", "15", "60", "D", ...) vs. the
+// Jetson's own timeframe strings ("1M", "5M", "15M", "1H"). Only exact
+// matches are mapped — a chart on "D" or "240" has no Jetson equivalent, and
+// guessing the nearest one would silently correlate the wrong data.
+const RESOLUTION_TO_JETSON_TF = { 1: '1M', 5: '5M', 15: '15M', 60: '1H' };
+function mapResolutionToJetsonTf(resolution) {
+  return RESOLUTION_TO_JETSON_TF[resolution] ?? null;
+}
 
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 const MIN_SAFE_BIGINT = BigInt(Number.MIN_SAFE_INTEGER);
@@ -228,4 +251,57 @@ export async function getSynthesizedContext({ pairs, tf, bars } = {}) {
     },
     note: 'Regime/SMA/EMA/z-score/RSI computed server-side (Jake VanClief Modular Standard) — no need to recompute these from raw bars.',
   };
+}
+
+/**
+ * The connective tissue between the two data sources: reads whatever symbol
+ * and timeframe is actually on the live TradingView chart (via CDP) and maps
+ * it to the matching Jetson FX pair/timeframe, then returns that pair's
+ * synthesized regime context — so "what does the alt-data feed say about
+ * what I'm looking at right now" doesn't require the agent (or a human) to
+ * manually work out that the chart's "OANDA:EURUSD" is the Jetson's
+ * "EURUSD". Every failure mode (unmapped symbol, unmapped resolution, pair
+ * not currently live) is reported explicitly rather than silently guessing.
+ */
+export async function correlateChart({ tf: tfOverride, bars, _deps } = {}) {
+  const state = await chart.getState({ _deps });
+  const pair = extractFxPair(state.symbol);
+  const tf = tfOverride || mapResolutionToJetsonTf(state.resolution);
+
+  const base = {
+    success: true,
+    chart_symbol: state.symbol,
+    chart_resolution: state.resolution,
+    mapped_pair: pair,
+    mapped_tf: tf,
+  };
+
+  if (!pair) {
+    return {
+      ...base,
+      correlated: false,
+      reason: `Chart symbol "${state.symbol}" doesn't look like an FX pair the Jetson feed covers (expected a 6-letter pair like EURUSD, with or without a broker prefix before ":").`,
+    };
+  }
+  if (!tf) {
+    return {
+      ...base,
+      correlated: false,
+      reason: `TradingView resolution "${state.resolution}" has no direct Jetson timeframe match. Jetson covers 1-minute/5-minute/15-minute/1-hour bars — pass tf explicitly (e.g. tf: "15M") to correlate anyway.`,
+      available_jetson_timeframes: ['1M', '5M', '15M', '1H'],
+    };
+  }
+
+  const live = await getLivePairs();
+  if (!(live.pairs || []).includes(pair)) {
+    return {
+      ...base,
+      correlated: false,
+      reason: `Jetson isn't currently streaming "${pair}".`,
+      jetson_live_pairs: live.pairs,
+    };
+  }
+
+  const context = await getSynthesizedContext({ pairs: [pair], tf, bars });
+  return { ...base, correlated: true, jetson: context.pairs[0], token_footprint: context.token_footprint };
 }

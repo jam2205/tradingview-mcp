@@ -46,4 +46,12 @@ export function registerJetsonTools(server) {
     try { return jsonResult(await core.getSynthesizedContext({ pairs, tf, bars })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
+
+  server.tool('jetson_correlate_chart', 'Correlates the live TradingView chart with the Jetson FX data lake: reads the chart\'s current symbol/resolution (via chart_get_state), maps it to the matching Jetson pair/timeframe, and returns that pair\'s synthesized regime context. Use this instead of manually figuring out that the chart\'s "OANDA:EURUSD" is the Jetson\'s "EURUSD" — it reports explicitly when the symbol or resolution has no Jetson match rather than guessing.', {
+    tf: z.string().optional().describe('Override the Jetson timeframe instead of deriving it from the chart resolution (e.g. "15M") — use when the chart is on a resolution Jetson doesn\'t cover (e.g. "D")'),
+    bars: z.coerce.number().optional().describe('Bars of lookback for the computed stats (max 500, default 100)'),
+  }, async ({ tf, bars }) => {
+    try { return jsonResult(await core.correlateChart({ tf, bars })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
 }
