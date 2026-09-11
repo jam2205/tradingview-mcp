@@ -1026,3 +1026,119 @@ describe('jetson core — getCurrencyGraph()', () => {
     assert.equal(result.edges[0].pair, 'AUDNZD');
   });
 });
+
+function findSundayUTC(afterMs) {
+  let t = afterMs;
+  while (new Date(t).getUTCDay() !== 0) t += 86400000;
+  const d = new Date(t);
+  d.setUTCHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+// Builds candles_1h-shaped rows with a deterministic, known pattern: Monday
+// bars always close up, Tuesday bars always close down, everything else
+// flat — so the computed seasonality stats can be asserted precisely rather
+// than just "some number came back".
+function makeSeasonalCandles({ days = 21 } = {}) {
+  const start = findSundayUTC(Date.now() - (days + 7) * 86400000);
+  const rows = [];
+  for (let h = 0; h < days * 24; h++) {
+    const t = start + h * 3600000;
+    const dow = new Date(t).getUTCDay();
+    const open = 1.1;
+    let close = open;
+    if (dow === 1) close = open + 0.001; // Monday: reliably up
+    else if (dow === 2) close = open - 0.001; // Tuesday: reliably down
+    rows.push({
+      pair: 'EURUSD',
+      open,
+      high: Math.max(open, close) + 0.0002,
+      low: Math.min(open, close) - 0.0002,
+      close,
+      volume: null,
+      tick_count: null,
+      ohlc_source: 'twelvedata',
+      volume_source: null,
+      time: t,
+    });
+  }
+  return rows;
+}
+
+describe('jetson core — getSeasonality()', () => {
+  afterEach(() => { globalThis.fetch = originalFetch; });
+
+  it('computes real day-of-week stats with correct sign and sample size', async () => {
+    const rows = makeSeasonalCandles({ days: 21 });
+    globalThis.fetch = async () => arrowResponse(await makeTableFromRows(rows));
+    const result = await jetson.getSeasonality({ pair: 'EURUSD', lookbackDays: 30 });
+    assert.equal(result.available, true);
+    assert.equal(result.computed_from, 'candles_1h (not a native Jetson dataset — computed here)');
+
+    const monday = result.by_day_of_week.find((d) => d.day === 'Monday');
+    const tuesday = result.by_day_of_week.find((d) => d.day === 'Tuesday');
+    const wednesday = result.by_day_of_week.find((d) => d.day === 'Wednesday');
+    assert.ok(monday.avg_return_pct > 0, `expected positive Monday return, got ${monday.avg_return_pct}`);
+    assert.ok(tuesday.avg_return_pct < 0, `expected negative Tuesday return, got ${tuesday.avg_return_pct}`);
+    assert.equal(wednesday.avg_return_pct, 0);
+    assert.equal(monday.n, 3 * 24); // 3 Mondays in a 21-day window, 24 bars each
+  });
+
+  it('reports available:false rather than a misleading result when history is too thin', async () => {
+    const rows = makeSeasonalCandles({ days: 2 });
+    globalThis.fetch = async () => arrowResponse(await makeTableFromRows(rows));
+    const result = await jetson.getSeasonality({ pair: 'EURUSD', lookbackDays: 30 });
+    assert.equal(result.available, false);
+    assert.match(result.reason, /not enough history/);
+  });
+
+  it('reports available:false for a pair with no candles_1h history at all', async () => {
+    const { tableFromArrays: tfa } = await import('apache-arrow');
+    const empty = tfa({ pair: [], open: [], high: [], low: [], close: [], volume: [], tick_count: [], ohlc_source: [], volume_source: [], time: [] });
+    globalThis.fetch = async () => arrowResponse(empty);
+    const result = await jetson.getSeasonality({ pair: 'EURUSD' });
+    assert.equal(result.available, false);
+  });
+});
+
+describe('jetson core — annotateSeasonality()', () => {
+  afterEach(() => { globalThis.fetch = originalFetch; });
+
+  it('draws today\'s seasonal read when today has samples', async () => {
+    const rows = makeSeasonalCandles({ days: 21 });
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('candles_1h')) return arrowResponse(await makeTableFromRows(rows));
+      if (String(url).includes('live_bars')) return arrowResponse(makeBarsTable({ count: 5 }));
+      return jsonResponse({}, false, 404);
+    };
+    const result = await jetson.annotateSeasonality({ pair: 'EURUSD', _deps: makeAnnotateDeps() });
+    // Whether it draws depends on whether "today" (real UTC day, test runs any day
+    // of the week) has samples — every day of the week is represented in the
+    // 21-day fixture, so it should always have a non-zero bucket.
+    assert.equal(result.drawn, true);
+    assert.ok(result.entity_id);
+  });
+
+  it('draw:false returns the seasonality data without drawing anything', async () => {
+    const rows = makeSeasonalCandles({ days: 21 });
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('candles_1h')) return arrowResponse(await makeTableFromRows(rows));
+      return jsonResponse({}, false, 404);
+    };
+    const result = await jetson.annotateSeasonality({ pair: 'EURUSD', draw: false, _deps: makeAnnotateDeps() });
+    assert.equal(result.drawn, false);
+    assert.equal(result.seasonality.available, true);
+  });
+
+  it('defaults to the chart symbol when no pair is given', async () => {
+    const rows = makeSeasonalCandles({ days: 21 }).map((r) => ({ ...r, pair: 'GBPUSD' }));
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('candles_1h')) return arrowResponse(await makeTableFromRows(rows));
+      if (String(url).includes('live_bars')) return arrowResponse(makeBarsTable({ count: 5 }));
+      return jsonResponse({}, false, 404);
+    };
+    const result = await jetson.annotateSeasonality({ _deps: makeAnnotateDeps({ symbol: 'OANDA:GBPUSD', resolution: '15' }) });
+    assert.equal(result.pair, 'GBPUSD');
+    assert.equal(result.drawn, true);
+  });
+});

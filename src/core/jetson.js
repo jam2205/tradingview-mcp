@@ -1061,3 +1061,150 @@ export async function getCurrencyGraph({ currencies, pairs } = {}) {
     note: 'FX-only graph — this Jetson feed has no equities/commodities/index data, so no such nodes exist here. Every edge field traces to a real dataset (carry_features, cot_pair_sentiment, fx_risk_snapshot); nothing is a fabricated correlation.',
   };
 }
+
+// ---------------------------------------------------------------------------
+// Seasonality — NOT a native Jetson dataset. Checked the full catalog first:
+// the only columns resembling seasonality (day_of_week, hour_utc) live in
+// `enriched_signals`, which is explicitly dead (SUPERSEDED, no live producer,
+// 836h+ stale, "must not be presented as edge" per its own description).
+// Building on that would be worse than having nothing. Instead this computes
+// real day-of-week / hour-of-day statistics directly from `candles_1h`
+// (verified live: ~275 days of genuine hourly history for EURUSD) — the same
+// "compute it here from real bars" approach as summarizeBars()'s SMA/RSI,
+// just on a longer window. Every average carries its sample size so
+// reliability can be judged rather than assumed.
+// ---------------------------------------------------------------------------
+
+const DOW_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MAX_SEASONALITY_BARS = 5000; // ~208 days of 1H candles per request
+
+function summarizeSeasonalityBucket(b) {
+  if (!b.n) return { n: 0, avg_range: null, avg_return_pct: null, return_stddev_pct: null };
+  const meanRet = b.sumRet / b.n;
+  const variance = Math.max(b.sumRetSq / b.n - meanRet * meanRet, 0);
+  return {
+    n: b.n,
+    avg_range: round(b.sumRange / b.n, 5),
+    avg_return_pct: round(meanRet * 100, 4),
+    return_stddev_pct: round(Math.sqrt(variance) * 100, 4),
+  };
+}
+
+/**
+ * Real day-of-week / hour-of-day (UTC) statistics computed from candles_1h
+ * history — see the module note above for why this exists instead of
+ * pulling from a Jetson dataset. Day-of-week buckets use UTC calendar-day
+ * boundaries, not the FX trading day's 17:00 EST rollover, so bars near the
+ * Friday-close/Sunday-open boundary may bucket a few hours differently than
+ * a broker's own "trading day" would. FX is closed weekends, so Saturday
+ * and most of Sunday legitimately have ~0 samples — reported as n:0, not
+ * hidden or backfilled.
+ */
+export async function getSeasonality({ pair, lookbackDays = 180 } = {}) {
+  if (!pair) throw new Error('pair is required (e.g. "EURUSD")');
+  const rows = sortAndDedupeByTime(await jetsonFetchArrowRows(`/v1/arrow/candles_1h?pair=${encodeURIComponent(pair)}&limit=${MAX_SEASONALITY_BARS}`));
+  if (!rows.length) {
+    return { success: true, pair, available: false, reason: `No candles_1h history for "${pair}".` };
+  }
+
+  const cutoff = Date.now() - lookbackDays * 86400000;
+  const sample = rows.filter((r) => r.time >= cutoff && typeof r.open === 'number' && typeof r.close === 'number' && typeof r.high === 'number' && typeof r.low === 'number');
+  if (sample.length < 24 * 7) {
+    return {
+      success: true,
+      pair,
+      available: false,
+      reason: `Only ${sample.length} usable hourly bars in the last ${lookbackDays} days for "${pair}" — not enough history for meaningful seasonality (need at least a week's worth).`,
+    };
+  }
+
+  const byDow = Array.from({ length: 7 }, () => ({ n: 0, sumRange: 0, sumRet: 0, sumRetSq: 0 }));
+  const byHour = Array.from({ length: 24 }, () => ({ n: 0, sumRange: 0, sumRet: 0, sumRetSq: 0 }));
+
+  for (const r of sample) {
+    const d = new Date(r.time);
+    const range = r.high - r.low;
+    const ret = r.open ? (r.close - r.open) / r.open : 0;
+    for (const bucket of [byDow[d.getUTCDay()], byHour[d.getUTCHours()]]) {
+      bucket.n += 1;
+      bucket.sumRange += range;
+      bucket.sumRet += ret;
+      bucket.sumRetSq += ret * ret;
+    }
+  }
+
+  return {
+    success: true,
+    pair,
+    available: true,
+    computed_from: 'candles_1h (not a native Jetson dataset — computed here)',
+    lookback_days: lookbackDays,
+    sample_bars: sample.length,
+    note: 'day-of-week buckets use UTC calendar days, not the FX 17:00 EST trading-day rollover. Saturday/most-Sunday buckets have ~0 samples by design (market closed), not missing data. Weigh small-n buckets proportionately.',
+    by_day_of_week: DOW_NAMES.map((day, i) => ({ day, ...summarizeSeasonalityBucket(byDow[i]) })),
+    by_hour_utc: byHour.map((b, hour_utc) => ({ hour_utc, ...summarizeSeasonalityBucket(b) })),
+  };
+}
+
+/**
+ * Draws today's (UTC) day-of-week seasonal read as a text flag on the live
+ * chart, anchored to the pair's latest Jetson close. Refuses to draw when
+ * today's bucket has zero samples (e.g. a weekend) rather than showing a
+ * meaningless n:0 average as if it were real.
+ */
+export async function annotateSeasonality({ pair: pairArg, draw = true, lookbackDays = 180, _deps } = {}) {
+  let pair = pairArg;
+  let chartSymbol = null;
+  if (!pair) {
+    const state = await chart.getState({ _deps });
+    chartSymbol = state.symbol;
+    pair = extractFxPair(chartSymbol);
+    if (!pair) {
+      return {
+        success: true,
+        chart_symbol: chartSymbol,
+        drawn: false,
+        reason: `Chart symbol "${chartSymbol}" doesn't look like an FX pair. Pass pair explicitly to annotate a symbol the chart isn't currently on.`,
+      };
+    }
+  }
+
+  const seasonality = await getSeasonality({ pair, lookbackDays });
+  if (!draw || !seasonality.available) {
+    return { success: true, pair, chart_symbol: chartSymbol, drawn: false, seasonality };
+  }
+
+  const todayDow = new Date().getUTCDay();
+  const todayStats = seasonality.by_day_of_week[todayDow];
+  if (!todayStats.n) {
+    return {
+      success: true,
+      pair,
+      chart_symbol: chartSymbol,
+      drawn: false,
+      seasonality,
+      reason: `No historical samples for today (${todayStats.day}) in the last ${lookbackDays} days — market is typically closed then.`,
+    };
+  }
+
+  const price = await getLatestClose(pair);
+  if (price == null) {
+    return { success: true, pair, chart_symbol: chartSymbol, drawn: false, seasonality, reason: 'Could not fetch a current price from the Jetson feed to anchor the label.' };
+  }
+
+  const sign = todayStats.avg_return_pct >= 0 ? '+' : '';
+  const text = `Seasonality (${todayStats.day}, n=${todayStats.n}): avg ${sign}${todayStats.avg_return_pct}%, avg range ${todayStats.avg_range}`;
+
+  try {
+    const result = await drawShape({
+      shape: 'text',
+      point: { time: Math.floor(Date.now() / 1000), price },
+      text,
+      overrides: { color: todayStats.avg_return_pct >= 0 ? '#10b981' : '#f43f5e' },
+      _deps,
+    });
+    return { success: true, pair, chart_symbol: chartSymbol, drawn: true, entity_id: result.entity_id, anchored_price: price, seasonality };
+  } catch (err) {
+    return { success: true, pair, chart_symbol: chartSymbol, drawn: false, error: err.message, seasonality };
+  }
+}
