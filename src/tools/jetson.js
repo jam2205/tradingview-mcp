@@ -20,7 +20,7 @@ export function registerJetsonTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('jetson_get_live_bars', 'Get live OHLCV bars for one FX pair from the Jetson. Use summary=true for a compact regime/indicator readout instead of raw bars (saves context).', {
+  server.tool('jetson_get_live_bars', 'Get live OHLCV bars for one FX pair from the Jetson. Use summary=true for a compact regime/indicator readout instead of raw bars (saves context). NOTE: the live ring buffer holds a fixed wall-clock window per timeframe, not a fixed bar count — verified ~9 bars for 1H, ~32 for 15M, ~93 for 5M. On 1H, sma20/ema20/zscore20/rsi14 will usually come back null (not enough bars exist) — this is a real data-depth limit, not a bug; prefer 15M or 1M for indicators that need a full window.', {
     pair: z.string().describe('FX pair, e.g. "EURUSD"'),
     tf: z.string().optional().describe('Timeframe: "1M", "5M", "15M", or "1H" (default "1M")'),
     limit: z.coerce.number().optional().describe('Number of bars to retrieve (max 500, default 100)'),

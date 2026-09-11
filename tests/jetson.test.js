@@ -86,6 +86,46 @@ describe('jetson core — getLiveBars()', () => {
     assert.equal(typeof result.bars[0].close, 'number');
   });
 
+  // Reproduces a real, verified quirk of the Jetson live_bars API: when a
+  // request exceeds how many bars fit in that timeframe's ring-buffer
+  // window, the API prepends a duplicate of the current in-progress bar and
+  // returns the rest out of chronological order (confirmed live, repeatedly
+  // reproducible for 1H/15M/5M once the limit exceeds ~10/~33/~94 bars
+  // respectively). getLiveBars must sort+dedupe rather than trust order.
+  it('sorts and de-duplicates a corrupted (duplicate-prepended, out-of-order) API response', async () => {
+    const clean = makeBarsTable({ count: 5 }).toArray();
+    const corrupted = [clean[clean.length - 1], ...clean]; // exact shape observed live
+    const { tableFromArrays: tfa } = await import('apache-arrow');
+    const cols = {};
+    for (const k of Object.keys(corrupted[0])) cols[k] = corrupted.map((r) => r[k]);
+    globalThis.fetch = async () => arrowResponse(tfa(cols));
+
+    const result = await jetson.getLiveBars({ pair: 'EURUSD' });
+    assert.equal(result.bar_count, 5); // de-duplicated back to the true 5 bars
+    const times = result.bars.map((b) => Number(b.time));
+    const sorted = [...times].sort((a, b) => a - b);
+    assert.deepEqual(times, sorted); // ascending, not the corrupted API order
+    assert.equal(new Set(times).size, 5); // no duplicate timestamp survives
+  });
+
+  it('summary mode computes period/change_pct from the TRUE oldest/newest bar, not array position, given a corrupted response', async () => {
+    const clean = makeBarsTable({ count: 40, trendUp: true, drift: 0.002 }).toArray();
+    const corrupted = [clean[clean.length - 1], ...clean];
+    const { tableFromArrays: tfa } = await import('apache-arrow');
+    const cols = {};
+    for (const k of Object.keys(corrupted[0])) cols[k] = corrupted.map((r) => r[k]);
+    globalThis.fetch = async () => arrowResponse(tfa(cols));
+
+    const result = await jetson.getLiveBars({ pair: 'EURUSD', summary: true });
+    // With the bug, "first" would be the duplicated current bar, collapsing
+    // change_pct to ~0% and period.from===period.to. Fixed, it must reflect
+    // the real 40-bar uptrend.
+    assert.equal(result.period.from, Number(clean[0].time));
+    assert.equal(result.period.to, Number(clean[clean.length - 1].time));
+    assert.ok(result.change_pct > 0, `expected a positive change_pct for a steady uptrend, got ${result.change_pct}`);
+    assert.equal(result.regime, 'bullish_expansion');
+  });
+
   it('preserves in-range bigints as numbers but keeps out-of-range ones as exact strings', async () => {
     const nsTimestamp = 1_700_000_000_000_000_000n; // nanosecond epoch — exceeds MAX_SAFE_INTEGER
     const table = tableFromArrays({
