@@ -73,7 +73,9 @@ Jetson pipeline builder bridge (separate live FX data lake, direct Ethernet link
 - jetson_health_check → verify the link and see the dataset catalog summary
 - jetson_get_synthesized_context → ALWAYS prefer this over raw bars when reasoning about market regime for pairs you already know by name. Returns pre-computed SMA/EMA/z-score/RSI/regime per pair — do not recompute these yourself from raw OHLCV
 - jetson_get_live_pairs / jetson_get_live_bars → raw live tick-bar access when you specifically need bars, not a summary (pass summary=true on jetson_get_live_bars for the same distilled readout, scoped to one pair)
-- jetson_get_dataset_catalog / jetson_get_dataset → the other 30 medallion datasets (dealer levels, gamma/COT/vol regime, ML-ready sets)
+- jetson_annotate_key_levels → gamma exposure walls/magnet + dealer prior day/week high-low + 20D dealer range, drawn straight onto the live chart as horizontal lines in ONE call (defaults to the chart's current symbol). Prefer this over separately fetching levels and calling draw_shape per level.
+- jetson_get_gamma_levels / jetson_get_dealer_levels → the same level data without drawing, if you just need the numbers
+- jetson_get_dataset_catalog / jetson_get_dataset → the other medallion datasets (COT sentiment, vol regime, ML-ready sets, etc.)
 
 CONTEXT MANAGEMENT:
 - ALWAYS use summary=true on data_get_ohlcv

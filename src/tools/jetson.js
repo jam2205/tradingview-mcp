@@ -54,4 +54,26 @@ export function registerJetsonTools(server) {
     try { return jsonResult(await core.correlateChart({ tf, bars })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
+
+  server.tool('jetson_get_gamma_levels', 'Get dealer gamma exposure levels for an FX pair from Saxo options data (the gamma "walls" and the gamma-weighted magnet strike). FX majors only — the 20 minor crosses have no listed vanilla options, so "available: false" for those is expected, not an error.', {
+    pair: z.string().describe('FX pair, e.g. "EURUSD"'),
+  }, async ({ pair }) => {
+    try { return jsonResult(await core.getGammaLevels({ pair })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('jetson_get_dealer_levels', 'Get dealer reference levels for an FX pair: prior day/week high-low and the 20-day dealer range extremes.', {
+    pair: z.string().describe('FX pair, e.g. "EURUSD"'),
+  }, async ({ pair }) => {
+    try { return jsonResult(await core.getDealerLevels({ pair })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('jetson_annotate_key_levels', 'Fetches gamma exposure levels + dealer reference levels for an FX pair (defaulting to whatever symbol is on the live chart) and draws them as horizontal lines directly on the chart in one call — gamma walls/magnet, prior day/week high-low, 20-day dealer range. Pass draw=false to just fetch the levels without drawing anything.', {
+    pair: z.string().optional().describe('FX pair, e.g. "EURUSD". Omit to use the symbol currently on the live chart.'),
+    draw: z.coerce.boolean().optional().describe('Draw the levels on the chart (default true). Set false to only fetch the data.'),
+  }, async ({ pair, draw }) => {
+    try { return jsonResult(await core.annotateKeyLevels({ pair, draw })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
 }

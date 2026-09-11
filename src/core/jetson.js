@@ -12,6 +12,7 @@
  */
 import { tableFromIPC } from 'apache-arrow';
 import * as chart from './chart.js';
+import { drawShape } from './drawing.js';
 
 const JETSON_BASE_URL = process.env.JETSON_BASE_URL || 'http://10.10.10.1:8769';
 const REQUEST_TIMEOUT_MS = 5000;
@@ -90,6 +91,12 @@ const jetsonFetchArrowRows = (pathAndQuery) => jetsonRequest(pathAndQuery, async
 });
 
 const round = (v, dp = 5) => (v == null || Number.isNaN(v) ? null : Math.round(v * 10 ** dp) / 10 ** dp);
+
+// Arrow timestamp columns come back from apache-arrow as raw epoch-ms
+// numbers (not Date instances), which the JSON output should never carry
+// as-is — an agent (or a person) reading "1789092303419.637" has no idea
+// what that means without decoding it.
+const toIso = (ms) => (ms == null ? null : new Date(ms).toISOString());
 
 function sma(values, period) {
   if (values.length < period) return null;
@@ -304,4 +311,185 @@ export async function correlateChart({ tf: tfOverride, bars, _deps } = {}) {
 
   const context = await getSynthesizedContext({ pairs: [pair], tf, bars });
   return { ...base, correlated: true, jetson: context.pairs[0], token_footprint: context.token_footprint };
+}
+
+// gamma_levels rows are a time series (multiple snapshots per pair, 6 rows —
+// GAMMA_1..5 + GAMMA_WEIGHTED — per snapshot). The dataset's own description
+// warns: take the latest snapshot per pair, never a global MAX across pairs,
+// and don't compare snapshots built from different days_to_expiry_used. This
+// keeps only the rows sharing the single most recent valid_from.
+function latestGammaSnapshot(rows) {
+  if (!rows.length) return [];
+  const latest = rows.reduce((max, r) => (r.valid_from > max ? r.valid_from : max), rows[0].valid_from);
+  return rows.filter((r) => r.valid_from === latest);
+}
+
+// dealers_levels carries one row per session_date; keep only the latest.
+function latestDealerSession(rows) {
+  if (!rows.length) return null;
+  return rows.reduce((latest, r) => (r.session_date > latest.session_date ? r : latest), rows[0]);
+}
+
+export async function getGammaLevels({ pair } = {}) {
+  if (!pair) throw new Error('pair is required (e.g. "EURUSD")');
+  const rows = await jetsonFetchArrowRows(`/v1/arrow/gamma_levels?pair=${encodeURIComponent(pair)}&limit=60`);
+  const snapshot = latestGammaSnapshot(rows);
+  if (!snapshot.length) {
+    return {
+      success: true,
+      pair,
+      available: false,
+      reason: 'No gamma data for this pair — Saxo only lists FX vanilla options on the majors, so the 20 minor crosses have none. Not an error.',
+    };
+  }
+  const first = snapshot[0];
+  const levels = snapshot
+    .map((r) => {
+      // GAMMA_WEIGHTED is the synthetic gamma-weighted mean strike, not a
+      // real discrete strike — the API legitimately has no per-strike gamma
+      // or distance for it. We already have level_price + spot_mid, so
+      // compute the distance ourselves instead of leaving it null.
+      // Note: the API's strike_dist_pct is a raw ratio (0.0013 = 0.13%)
+      // despite the name — scale both paths to an actual percentage.
+      const distPct = r.strike_dist_pct != null
+        ? r.strike_dist_pct * 100
+        : (r.spot_mid ? ((r.level_price - r.spot_mid) / r.spot_mid) * 100 : null);
+      return {
+        level_name: r.level_name,
+        price: round(r.level_price),
+        gamma: r.gamma,
+        gamma_rank: r.gamma_rank,
+        dist_from_spot_pct: round(distPct, 3),
+      };
+    })
+    .sort((a, b) => (a.level_name === 'GAMMA_WEIGHTED' ? -1 : b.level_name === 'GAMMA_WEIGHTED' ? 1 : a.gamma_rank - b.gamma_rank));
+  return {
+    success: true,
+    pair,
+    available: true,
+    spot_mid: round(first.spot_mid),
+    total_gamma: first.total_gamma,
+    gamma_skew_vs_spot: round(first.gamma_skew_vs_spot, 4),
+    expiry_used: first.expiry_used,
+    days_to_expiry_used: first.days_to_expiry_used,
+    valid_from: toIso(first.valid_from),
+    levels,
+  };
+}
+
+export async function getDealerLevels({ pair } = {}) {
+  if (!pair) throw new Error('pair is required (e.g. "EURUSD")');
+  const rows = await jetsonFetchArrowRows(`/v1/arrow/dealers_levels?pair=${encodeURIComponent(pair)}&limit=5`);
+  const row = latestDealerSession(rows);
+  if (!row) {
+    return { success: true, pair, available: false, reason: 'No dealer level data for this pair.' };
+  }
+  return {
+    success: true,
+    pair,
+    available: true,
+    session_date: toIso(row.session_date),
+    levels: {
+      pdh: round(row.pdh),
+      pdl: round(row.pdl),
+      pdm: round(row.pdm),
+      pwh: round(row.pwh),
+      pwl: round(row.pwl),
+      dealers_range_high_20d: round(row.dealers_range_high_20d),
+      dealers_range_low_20d: round(row.dealers_range_low_20d),
+    },
+  };
+}
+
+// Draw style + human label per level key — shared between gamma and dealer
+// levels so annotateKeyLevels() can treat both uniformly.
+const LEVEL_STYLES = {
+  GAMMA_WEIGHTED: { label: 'Gamma Magnet', color: '#f59e0b', width: 2 },
+  GAMMA_1: { label: 'Gamma Wall #1', color: '#a855f7', width: 1 },
+  GAMMA_2: { label: 'Gamma Wall #2', color: '#a855f7', width: 1 },
+  GAMMA_3: { label: 'Gamma Wall #3', color: '#a855f7', width: 1 },
+  GAMMA_4: { label: 'Gamma Wall #4', color: '#a855f7', width: 1 },
+  GAMMA_5: { label: 'Gamma Wall #5', color: '#a855f7', width: 1 },
+  pdh: { label: 'Prior Day High', color: '#38bdf8', width: 1 },
+  pdl: { label: 'Prior Day Low', color: '#38bdf8', width: 1 },
+  pdm: { label: 'Prior Day Mid', color: '#64748b', width: 1 },
+  pwh: { label: 'Prior Week High', color: '#14b8a6', width: 1 },
+  pwl: { label: 'Prior Week Low', color: '#14b8a6', width: 1 },
+  dealers_range_high_20d: { label: '20D Dealer Range High', color: '#94a3b8', width: 1 },
+  dealers_range_low_20d: { label: '20D Dealer Range Low', color: '#94a3b8', width: 1 },
+};
+
+/**
+ * Fetches gamma exposure levels and dealer reference levels for a pair
+ * (defaulting to whatever's on the live chart, via the same symbol mapping
+ * as correlateChart) and — by default — draws them straight onto the chart
+ * as horizontal lines via draw_shape, in one call. This is a single
+ * fetch-and-annotate tool rather than "fetch levels" + N separate
+ * "draw_shape" calls, because the agent should not need to loop tool calls
+ * per level just to put institutional reference levels on the chart.
+ */
+export async function annotateKeyLevels({ pair: pairArg, draw = true, _deps } = {}) {
+  let pair = pairArg;
+  let chartSymbol = null;
+  if (!pair) {
+    const state = await chart.getState({ _deps });
+    chartSymbol = state.symbol;
+    pair = extractFxPair(chartSymbol);
+    if (!pair) {
+      return {
+        success: true,
+        chart_symbol: chartSymbol,
+        drawn: false,
+        reason: `Chart symbol "${chartSymbol}" doesn't look like an FX pair (expected e.g. EURUSD). Pass pair explicitly to annotate a symbol the chart isn't currently on.`,
+      };
+    }
+  }
+
+  const [gamma, dealer] = await Promise.all([getGammaLevels({ pair }), getDealerLevels({ pair })]);
+
+  const toDraw = [];
+  if (gamma.available) {
+    for (const lvl of gamma.levels) toDraw.push({ key: lvl.level_name, price: lvl.price });
+  }
+  if (dealer.available) {
+    for (const [key, price] of Object.entries(dealer.levels)) {
+      if (price != null) toDraw.push({ key, price });
+    }
+  }
+
+  if (!draw || toDraw.length === 0) {
+    return { success: true, pair, chart_symbol: chartSymbol, drawn: false, gamma, dealer };
+  }
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const drawn = [];
+  const failed = [];
+  for (const { key, price } of toDraw) {
+    const style = LEVEL_STYLES[key] || { label: key, color: '#94a3b8', width: 1 };
+    try {
+      const result = await drawShape({
+        shape: 'horizontal_line',
+        point: { time: nowSec, price },
+        text: `${style.label} ${price}`,
+        overrides: { linecolor: style.color, linewidth: style.width },
+        _deps,
+      });
+      drawn.push({ key, label: style.label, price, entity_id: result.entity_id });
+    } catch (err) {
+      failed.push({ key, price, error: err.message });
+    }
+  }
+
+  return {
+    success: true,
+    pair,
+    chart_symbol: chartSymbol,
+    drawn: true,
+    lines_drawn: drawn.length,
+    lines_failed: failed.length,
+    drawn_levels: drawn,
+    failed_levels: failed.length ? failed : undefined,
+    gamma,
+    dealer,
+  };
 }
