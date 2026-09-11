@@ -159,4 +159,21 @@ export function registerJetsonTools(server) {
     try { return jsonResult(await core.getCurrencyGraph({ currencies, pairs })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
+
+  server.tool('jetson_get_seasonality', 'Get real day-of-week / hour-of-day (UTC) seasonality statistics for an FX pair — NOT a native Jetson dataset, computed here from real candles_1h history (the only "seasonality-shaped" Jetson columns live in the dead, superseded enriched_signals dataset, which must never be used as a live signal). Every average carries its sample size (n) — weigh small-n buckets proportionately. Saturday/most-Sunday buckets legitimately have n:0 (market closed).', {
+    pair: z.string().describe('FX pair, e.g. "EURUSD"'),
+    lookbackDays: z.coerce.number().optional().describe('Days of candles_1h history to compute over (default 180, max ~208 available per request)'),
+  }, async ({ pair, lookbackDays }) => {
+    try { return jsonResult(await core.getSeasonality({ pair, lookbackDays })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('jetson_annotate_seasonality', 'Draws today\'s (UTC) day-of-week seasonal read (avg return, avg range, sample size) as a text flag on the live chart — defaulting to whatever symbol is on the chart. Computed from real candles_1h history, not a native Jetson feed. Refuses to draw (drawn:false) when today has zero historical samples (e.g. a weekend) rather than showing a meaningless average. Pass draw=false to just fetch the stats.', {
+    pair: z.string().optional().describe('FX pair, e.g. "EURUSD". Omit to use the symbol currently on the live chart.'),
+    draw: z.coerce.boolean().optional().describe('Draw the flag on the chart (default true). Set false to only fetch the data.'),
+    lookbackDays: z.coerce.number().optional().describe('Days of candles_1h history to compute over (default 180)'),
+  }, async ({ pair, draw, lookbackDays }) => {
+    try { return jsonResult(await core.annotateSeasonality({ pair, draw, lookbackDays })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
 }
