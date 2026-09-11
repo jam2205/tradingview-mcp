@@ -14,6 +14,7 @@ import { registerWatchlistTools } from './tools/watchlist.js';
 import { registerUiTools } from './tools/ui.js';
 import { registerPaneTools } from './tools/pane.js';
 import { registerTabTools } from './tools/tab.js';
+import { registerJetsonTools } from './tools/jetson.js';
 
 const server = new McpServer(
   {
@@ -60,6 +61,12 @@ Launch: tv_launch → auto-detect and start TradingView with CDP on any platform
 Panes: pane_list, pane_set_layout (s, 2h, 2v, 4, 6, 8), pane_focus, pane_set_symbol
 Tabs: tab_list, tab_new, tab_close, tab_switch
 
+Jetson pipeline builder bridge (separate live FX data lake, direct Ethernet link, only reachable from this desktop):
+- jetson_health_check → verify the link and see the dataset catalog summary
+- jetson_get_synthesized_context → ALWAYS prefer this over raw bars when reasoning about market regime. Returns pre-computed SMA/EMA/z-score/RSI/regime per pair — do not recompute these yourself from raw OHLCV
+- jetson_get_live_pairs / jetson_get_live_bars → raw live tick-bar access when you specifically need bars, not a summary (pass summary=true on jetson_get_live_bars for the same distilled readout, scoped to one pair)
+- jetson_get_dataset_catalog / jetson_get_dataset → the other 30 medallion datasets (dealer levels, gamma/COT/vol regime, ML-ready sets)
+
 CONTEXT MANAGEMENT:
 - ALWAYS use summary=true on data_get_ohlcv
 - ALWAYS use study_filter on pine tools when you know which indicator you want
@@ -84,6 +91,7 @@ registerWatchlistTools(server);
 registerUiTools(server);
 registerPaneTools(server);
 registerTabTools(server);
+registerJetsonTools(server);
 
 // Startup notice (stderr so it doesn't interfere with MCP stdio protocol)
 process.stderr.write('⚠  tradingview-mcp  |  Unofficial tool. Not affiliated with TradingView Inc. or Anthropic.\n');
