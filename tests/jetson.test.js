@@ -1101,6 +1101,136 @@ describe('jetson core — getSeasonality()', () => {
   });
 });
 
+// Every bar reliably closes up, regardless of day — makes "today"'s
+// historical direction deterministic (always UP) no matter which real day
+// of the week the test suite actually runs on.
+function makeAllUpCandles({ days = 21 } = {}) {
+  const start = findSundayUTC(Date.now() - (days + 7) * 86400000);
+  const rows = [];
+  for (let h = 0; h < days * 24; h++) {
+    const t = start + h * 3600000;
+    const open = 1.1;
+    const close = open + 0.001;
+    rows.push({ pair: 'EURUSD', open, high: close + 0.0002, low: open - 0.0002, close, volume: null, tick_count: null, ohlc_source: 'twelvedata', volume_source: null, time: t });
+  }
+  return rows;
+}
+
+describe('jetson core — getSeasonality() confluence weekly_profile cross-reference', () => {
+  afterEach(() => { globalThis.fetch = originalFetch; });
+
+  function mockFetchWith(weeklyProfileRow) {
+    const candles = makeAllUpCandles({ days: 21 });
+    return async (url) => {
+      if (String(url).includes('candles_1h')) return arrowResponse(await makeTableFromRows(candles));
+      if (String(url).includes('confluence_layers')) return arrowResponse(await makeTableFromRows([weeklyProfileRow]));
+      return jsonResponse({}, false, 404);
+    };
+  }
+
+  it('parses the weekly_profile evidence string and flags AGREE when directions match', async () => {
+    globalThis.fetch = mockFetchWith(makeConfluenceLayerRow({
+      layer: 'weekly_profile', direction: 'UP', weight: 1.2, damped_weight: 1.1, stale: false,
+      evidence: 'week_profile quiet_week: bias=+0.42, events_high=0, computed=2026-09-11',
+    }));
+    const result = await jetson.getSeasonality({ pair: 'EURUSD', lookbackDays: 30 });
+    assert.equal(result.available, true);
+    const wp = result.confluence_weekly_profile;
+    assert.equal(wp.available, true);
+    assert.equal(wp.direction, 'UP');
+    assert.equal(wp.model_bias, 0.42);
+    assert.equal(wp.week_tag, 'quiet_week');
+    assert.equal(wp.high_impact_events_this_week, 0);
+    assert.equal(wp.trust_ratio, 0.917); // round(1.1 / 1.2, 3)
+    assert.equal(result.today_vs_confluence_agreement, 'AGREE'); // historical is always UP in this fixture
+  });
+
+  it('flags DIFFER when the confluence weekly bias points the opposite way', async () => {
+    globalThis.fetch = mockFetchWith(makeConfluenceLayerRow({
+      layer: 'weekly_profile', direction: 'DOWN', weight: 1.0, damped_weight: 0.8, stale: false,
+      evidence: 'week_profile event_week: bias=-0.55, events_high=2, computed=2026-09-11',
+    }));
+    const result = await jetson.getSeasonality({ pair: 'EURUSD', lookbackDays: 30 });
+    assert.equal(result.confluence_weekly_profile.direction, 'DOWN');
+    assert.equal(result.confluence_weekly_profile.week_tag, 'event_week');
+    assert.equal(result.today_vs_confluence_agreement, 'DIFFER');
+  });
+
+  it('falls back to the raw evidence string when it does not match the expected shape', async () => {
+    globalThis.fetch = mockFetchWith(makeConfluenceLayerRow({ layer: 'weekly_profile', direction: 'UP', evidence: 'some future format we do not parse' }));
+    const result = await jetson.getSeasonality({ pair: 'EURUSD', lookbackDays: 30 });
+    assert.equal(result.confluence_weekly_profile.evidence_raw, 'some future format we do not parse');
+    assert.equal(result.confluence_weekly_profile.model_bias, undefined);
+  });
+
+  it('is available:false without crashing seasonality when confluence data is unreachable', async () => {
+    const candles = makeAllUpCandles({ days: 21 });
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('candles_1h')) return arrowResponse(await makeTableFromRows(candles));
+      return jsonResponse({}, false, 404); // confluence_layers unreachable
+    };
+    const result = await jetson.getSeasonality({ pair: 'EURUSD', lookbackDays: 30 });
+    assert.equal(result.available, true); // seasonality itself still works
+    assert.equal(result.confluence_weekly_profile.available, false);
+    assert.equal(result.today_vs_confluence_agreement, null);
+  });
+
+  it('is N/A (not AGREE/DIFFER) when there is no weekly_profile layer in the latest run', async () => {
+    globalThis.fetch = mockFetchWith(makeConfluenceLayerRow({ layer: 'momentum', direction: 'UP' })); // no weekly_profile row at all
+    const result = await jetson.getSeasonality({ pair: 'EURUSD', lookbackDays: 30 });
+    assert.equal(result.confluence_weekly_profile.available, false);
+    assert.equal(result.today_vs_confluence_agreement, null);
+  });
+});
+
+describe('jetson core — annotateSeasonality() confluence weekly_profile weighting', () => {
+  afterEach(() => { globalThis.fetch = originalFetch; });
+
+  it('weaves the model week bias and trust weighting into the drawn flag text, and colors DIFFER amber', async () => {
+    const candles = makeAllUpCandles({ days: 21 }); // historical is always UP in this fixture
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('candles_1h')) return arrowResponse(await makeTableFromRows(candles));
+      if (String(url).includes('confluence_layers')) {
+        return arrowResponse(await makeTableFromRows([makeConfluenceLayerRow({
+          layer: 'weekly_profile', direction: 'DOWN', weight: 1.0, damped_weight: 0.6, stale: true,
+          evidence: 'week_profile event_week: bias=-0.55, events_high=2, computed=2026-09-11',
+        })]));
+      }
+      if (String(url).includes('live_bars')) return arrowResponse(makeBarsTable({ count: 5 }));
+      return jsonResponse({}, false, 404);
+    };
+
+    // Capture the actual JS evaluated by drawShape() so the drawn text/color
+    // can be asserted precisely, not just "something got drawn".
+    const capturedCalls = [];
+    const drawnIds = [];
+    let cycle = 0;
+    const evaluate = async (js) => {
+      capturedCalls.push(js);
+      cycle += 1;
+      const pos = cycle % 3;
+      if (pos === 1) return drawnIds.slice();
+      if (pos === 2) return null;
+      const id = `shape_${cycle}`;
+      drawnIds.push(id);
+      return drawnIds.slice();
+    };
+    const _deps = { evaluate, getChartApi: async () => 'window.mockApi' };
+
+    const result = await jetson.annotateSeasonality({ pair: 'EURUSD', _deps });
+    assert.equal(result.drawn, true);
+    assert.equal(result.seasonality.today_vs_confluence_agreement, 'DIFFER');
+
+    const createCall = capturedCalls.find((js) => js.includes('createShape'));
+    assert.ok(createCall, 'expected a createShape evaluate() call');
+    assert.match(createCall, /Model week bias: DOWN/);
+    assert.match(createCall, /trust 60%/); // round(0.6 / 1.0, 3) * 100
+    assert.match(createCall, /stale/);
+    assert.match(createCall, /\[DIFFER\]/);
+    assert.match(createCall, /#f59e0b/); // amber for a directional conflict, not the usual green/red
+  });
+});
+
 describe('jetson core — annotateSeasonality()', () => {
   afterEach(() => { globalThis.fetch = originalFetch; });
 
