@@ -217,7 +217,7 @@ Claude reads [`CLAUDE.md`](CLAUDE.md) automatically when working in this project
 | "Draw a level at 24500" | `draw_shape` (horizontal_line) |
 | "Take a screenshot" | `capture_screenshot` |
 
-## Tool Reference (78 MCP tools)
+## Tool Reference (99 MCP tools)
 
 ### Chart Reading
 
@@ -311,6 +311,23 @@ Read `line.new()`, `label.new()`, `table.new()`, `box.new()` output from any vis
 | `ui_open_panel` / `ui_click` / `ui_evaluate` | UI automation |
 | `tv_launch` / `tv_health_check` / `tv_discover` | Connection management |
 
+### Jetson Pipeline Builder Bridge
+
+A separate, real live FX data lake (30+ medallion-governed datasets, 28 pairs) reached over a direct Ethernet link — independent of the CDP/chart connection above. Only reachable from a desktop with `10.10.10.2/24` on its NIC, MAC-allowlisted on the Jetson's bridge firewall. See `SETUP_GUIDE.md` for link setup.
+
+| Tool | What it does |
+|------|-------------|
+| `jetson_health_check` | Verify the link and see the dataset catalog summary |
+| `jetson_correlate_chart` | Map the live chart's symbol/resolution to the matching Jetson pair/timeframe and return synthesized context |
+| `jetson_get_synthesized_context` | Pre-computed SMA/EMA/z-score/RSI/regime per pair — zero-token-burn distillation, prefer over raw bars |
+| `jetson_get_live_pairs` / `jetson_get_live_bars` | Raw live tick-bar access (pass `summary: true` on the latter for the distilled readout) |
+| `jetson_get_dataset_catalog` / `jetson_get_dataset` | Browse/fetch any of the other medallion datasets |
+| `jetson_get_gamma_levels` / `jetson_get_dealer_levels` / `jetson_annotate_key_levels` | Dealer gamma exposure walls + prior day/week levels, drawn on the chart in one call |
+| `jetson_get_cot_sentiment` / `jetson_annotate_cot_sentiment` | Institutional COT positioning bias, drawn as a chart flag |
+| `jetson_get_directional_regime` / `jetson_get_volatility_regime` / `jetson_annotate_regime_shading` | HMM regime classifiers (two orthogonal axes — never combined), shaded on the chart |
+| `jetson_get_confluence` / `jetson_get_confluence_layers` / `jetson_annotate_confluence_badge` | Multi-layer confluence call + per-layer breakdown, drawn as a chart badge |
+| `jetson_get_currency_node` / `jetson_get_pair_edge` / `jetson_get_currency_graph` | FX currency-node graph — real per-currency (COT, calendar) and per-pair (carry, risk coupling) data, FX-only |
+
 ## Context Management
 
 Tools return compact output by default to minimize context usage. For a typical "analyze my chart" workflow, total context is ~5-10KB instead of ~80KB.
@@ -353,7 +370,7 @@ npm test
 Claude Code  ←→  MCP Server (stdio)  ←→  CDP (port 9222)  ←→  TradingView Desktop (Electron)
 ```
 
-- **Transport**: MCP over stdio (84 tools) + CLI (`tv` command, 30 commands with 66 subcommands)
+- **Transport**: MCP over stdio (105 tools: 84 chart/CDP + 21 Jetson pipeline builder bridge) + CLI (`tv` command, 30 commands with 66 subcommands)
 - **Connection**: Chrome DevTools Protocol on localhost:9222
 - **Streaming**: Poll-and-diff loop with deduplication, JSONL output to stdout
 - **No dependencies** beyond `@modelcontextprotocol/sdk` and `chrome-remote-interface`
