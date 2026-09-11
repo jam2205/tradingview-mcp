@@ -17,13 +17,21 @@ const REQUEST_TIMEOUT_MS = 5000;
 const MAX_LIVE_BARS = 500;
 const MAX_SYNTH_PAIRS = 10;
 
-async function jetsonFetch(pathAndQuery) {
+const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
+const MIN_SAFE_BIGINT = BigInt(Number.MIN_SAFE_INTEGER);
+
+// Runs one Jetson request under a single abort timeout that stays armed
+// through `consume(res)` (not just until headers arrive) — a stalled Arrow/
+// JSON body on an otherwise-responsive connection would otherwise hang past
+// the advertised timeout, since fetch() itself resolves as soon as headers
+// are in.
+async function jetsonRequest(pathAndQuery, consume) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
     const res = await fetch(`${JETSON_BASE_URL}${pathAndQuery}`, { signal: controller.signal });
     if (!res.ok) throw new Error(`Jetson HTTP ${res.status} on ${pathAndQuery}`);
-    return res;
+    return await consume(res);
   } catch (err) {
     if (err.name === 'AbortError') {
       throw new Error(`Jetson request timed out after ${REQUEST_TIMEOUT_MS}ms — check the direct Ethernet link (this desktop needs 10.10.10.2/24 on its NIC, MAC-allowlisted on the Jetson's bridge firewall)`);
@@ -34,7 +42,9 @@ async function jetsonFetch(pathAndQuery) {
   }
 }
 
-async function arrowResponseToRows(res) {
+const jetsonFetchJson = (pathAndQuery) => jetsonRequest(pathAndQuery, (res) => res.json());
+
+const jetsonFetchArrowRows = (pathAndQuery) => jetsonRequest(pathAndQuery, async (res) => {
   const buf = new Uint8Array(await res.arrayBuffer());
   const table = tableFromIPC(buf);
   const fieldNames = table.schema.fields.map((f) => f.name);
@@ -42,13 +52,19 @@ async function arrowResponseToRows(res) {
     const plain = {};
     for (const key of fieldNames) {
       let value = row[key];
-      if (typeof value === 'bigint') value = Number(value);
-      else if (value instanceof Date) value = value.toISOString();
+      if (typeof value === 'bigint') {
+        // Nanosecond timestamps / 64-bit IDs can exceed Number.MAX_SAFE_INTEGER —
+        // casting those to Number silently corrupts them, so keep out-of-range
+        // values as exact decimal strings instead.
+        value = (value >= MIN_SAFE_BIGINT && value <= MAX_SAFE_BIGINT) ? Number(value) : value.toString();
+      } else if (value instanceof Date) {
+        value = value.toISOString();
+      }
       plain[key] = value;
     }
     return plain;
   });
-}
+});
 
 const round = (v, dp = 5) => (v == null || Number.isNaN(v) ? null : Math.round(v * 10 ** dp) / 10 ** dp);
 
@@ -124,14 +140,12 @@ function summarizeBars(rows) {
 
 export async function healthCheck() {
   const started = Date.now();
-  const res = await jetsonFetch('/health');
-  const body = await res.json();
+  const body = await jetsonFetchJson('/health');
   return { success: true, reachable: true, latency_ms: Date.now() - started, ...body };
 }
 
 export async function getDatasetCatalog({ verbose } = {}) {
-  const res = await jetsonFetch('/v1/arrow/datasets');
-  const body = await res.json();
+  const body = await jetsonFetchJson('/v1/arrow/datasets');
   const datasets = body.datasets || [];
   if (verbose) return { success: true, count: datasets.length, datasets };
   return {
@@ -149,8 +163,7 @@ export async function getDatasetCatalog({ verbose } = {}) {
 }
 
 export async function getLivePairs() {
-  const res = await jetsonFetch('/v1/arrow/live_bars/pairs');
-  const body = await res.json();
+  const body = await jetsonFetchJson('/v1/arrow/live_bars/pairs');
   return { success: true, ...body };
 }
 
@@ -158,8 +171,7 @@ export async function getLiveBars({ pair, tf, limit, summary } = {}) {
   if (!pair) throw new Error('pair is required (e.g. "EURUSD")');
   const timeframe = tf || '1M';
   const n = Math.min(limit || 100, MAX_LIVE_BARS);
-  const res = await jetsonFetch(`/v1/arrow/live_bars?pair=${encodeURIComponent(pair)}&tf=${encodeURIComponent(timeframe)}&limit=${n}`);
-  const rows = await arrowResponseToRows(res);
+  const rows = await jetsonFetchArrowRows(`/v1/arrow/live_bars?pair=${encodeURIComponent(pair)}&tf=${encodeURIComponent(timeframe)}&limit=${n}`);
   if (!rows.length) throw new Error(`No live bars returned for ${pair} ${timeframe}`);
 
   if (summary) return { success: true, pair, tf: timeframe, ...summarizeBars(rows) };
@@ -172,8 +184,7 @@ export async function getDataset({ dataset_url, params } = {}) {
     .filter(([, v]) => v !== undefined && v !== '')
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
     .join('&');
-  const res = await jetsonFetch(`${dataset_url}${query ? `?${query}` : ''}`);
-  const rows = await arrowResponseToRows(res);
+  const rows = await jetsonFetchArrowRows(`${dataset_url}${query ? `?${query}` : ''}`);
   return { success: true, dataset_url, row_count: rows.length, rows };
 }
 
@@ -196,8 +207,7 @@ export async function getSynthesizedContext({ pairs, tf, bars } = {}) {
   const results = [];
   for (const pair of targets) {
     try {
-      const res = await jetsonFetch(`/v1/arrow/live_bars?pair=${encodeURIComponent(pair)}&tf=${encodeURIComponent(timeframe)}&limit=${lookback}`);
-      const rows = await arrowResponseToRows(res);
+      const rows = await jetsonFetchArrowRows(`/v1/arrow/live_bars?pair=${encodeURIComponent(pair)}&tf=${encodeURIComponent(timeframe)}&limit=${lookback}`);
       results.push({ pair, ...summarizeBars(rows) });
     } catch (err) {
       results.push({ pair, error: err.message });

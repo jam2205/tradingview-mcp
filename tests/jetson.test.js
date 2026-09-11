@@ -86,6 +86,24 @@ describe('jetson core — getLiveBars()', () => {
     assert.equal(typeof result.bars[0].close, 'number');
   });
 
+  it('preserves in-range bigints as numbers but keeps out-of-range ones as exact strings', async () => {
+    const nsTimestamp = 1_700_000_000_000_000_000n; // nanosecond epoch — exceeds MAX_SAFE_INTEGER
+    const table = tableFromArrays({
+      time: [nsTimestamp, nsTimestamp + 60_000_000_000n],
+      open: [1.1, 1.1005],
+      high: [1.1006, 1.1007],
+      low: [1.0999, 1.1004],
+      close: [1.1005, 1.101],
+      volume: [10n, 20n], // small bigint — safe to cast to Number
+    });
+    globalThis.fetch = async () => arrowResponse(table);
+    const result = await jetson.getLiveBars({ pair: 'EURUSD' });
+    assert.equal(typeof result.bars[0].time, 'string');
+    assert.equal(result.bars[0].time, nsTimestamp.toString());
+    assert.equal(typeof result.bars[0].volume, 'number');
+    assert.equal(result.bars[0].volume, 10);
+  });
+
   it('summary=true returns computed regime/indicators, not raw bars', async () => {
     globalThis.fetch = async () => arrowResponse(makeBarsTable({ count: 40, trendUp: true, drift: 0.002 }));
     const result = await jetson.getLiveBars({ pair: 'EURUSD', summary: true });
