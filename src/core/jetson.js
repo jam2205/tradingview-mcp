@@ -493,3 +493,110 @@ export async function annotateKeyLevels({ pair: pairArg, draw = true, _deps } = 
     dealer,
   };
 }
+
+async function getLatestClose(pair, tf = '15M') {
+  const rows = await jetsonFetchArrowRows(`/v1/arrow/live_bars?pair=${encodeURIComponent(pair)}&tf=${encodeURIComponent(tf)}&limit=2`);
+  if (!rows.length) return null;
+  return rows[rows.length - 1].close;
+}
+
+const BIAS_STYLES = {
+  LONG_BASE: { color: '#10b981', label: 'COT: Long Bias' },
+  SHORT_BASE: { color: '#f43f5e', label: 'COT: Short Bias' },
+  NEUTRAL: { color: '#94a3b8', label: 'COT: Neutral' },
+};
+
+/**
+ * cot_pair_sentiment is keyed by currency PAIR (already resolved from the
+ * CFTC's per-currency data), with `institutional_bias` = base_index minus
+ * quote_index. CRITICAL, per the dataset's own description: bias is NULL —
+ * never 0 — when either leg's report is stale (all 7 NZD pairs are NULL
+ * because NZD froze 2022-02-01), and `is_complete`/`stale_legs` must be
+ * checked before rendering. A naive fallback to 0 would draw those pairs as
+ * falsely neutral, so incompleteness is always reported explicitly rather
+ * than coalesced.
+ */
+export async function getCotSentiment({ pair } = {}) {
+  if (!pair) throw new Error('pair is required (e.g. "EURUSD")');
+  const rows = await jetsonFetchArrowRows(`/v1/arrow/cot_pair_sentiment?pair=${encodeURIComponent(pair)}&limit=5`);
+  if (!rows.length) {
+    return { success: true, pair, available: false, reason: `No COT sentiment data for "${pair}".` };
+  }
+  const row = rows.reduce((latest, r) => (r.report_date > latest.report_date ? r : latest), rows[0]);
+
+  if (!row.is_complete || row.institutional_bias == null) {
+    return {
+      success: true,
+      pair,
+      available: false,
+      reason: `COT sentiment for "${pair}" is incomplete — a currency leg's report is stale (${row.stale_legs || 'unspecified leg'}). Reporting this as unavailable rather than a false neutral.`,
+      stale_legs: row.stale_legs,
+      report_date: toIso(row.report_date),
+    };
+  }
+
+  return {
+    success: true,
+    pair,
+    available: true,
+    base_ccy: row.base_ccy,
+    quote_ccy: row.quote_ccy,
+    institutional_bias: round(row.institutional_bias, 3),
+    bias_direction: row.bias_direction,
+    base_index: round(row.base_index, 1),
+    quote_index: round(row.quote_index, 1),
+    is_current: row.is_current,
+    report_age_days: row.report_age_days,
+    report_date: toIso(row.report_date),
+  };
+}
+
+/**
+ * Draws the current COT institutional-bias reading as a text flag on the
+ * live chart, anchored to the pair's latest Jetson close. Unlike the
+ * gamma/dealer levels this isn't a price level — it's a standing weekly
+ * positioning read — so a text label near current price communicates it
+ * better than a horizontal line across the whole chart.
+ */
+export async function annotateCotSentiment({ pair: pairArg, draw = true, _deps } = {}) {
+  let pair = pairArg;
+  let chartSymbol = null;
+  if (!pair) {
+    const state = await chart.getState({ _deps });
+    chartSymbol = state.symbol;
+    pair = extractFxPair(chartSymbol);
+    if (!pair) {
+      return {
+        success: true,
+        chart_symbol: chartSymbol,
+        drawn: false,
+        reason: `Chart symbol "${chartSymbol}" doesn't look like an FX pair. Pass pair explicitly to annotate a symbol the chart isn't currently on.`,
+      };
+    }
+  }
+
+  const sentiment = await getCotSentiment({ pair });
+  if (!draw || !sentiment.available) {
+    return { success: true, pair, chart_symbol: chartSymbol, drawn: false, sentiment };
+  }
+
+  const price = await getLatestClose(pair);
+  if (price == null) {
+    return { success: true, pair, chart_symbol: chartSymbol, drawn: false, sentiment, reason: 'Could not fetch a current price from the Jetson feed to anchor the label.' };
+  }
+
+  const style = BIAS_STYLES[sentiment.bias_direction] || { color: '#94a3b8', label: `COT: ${sentiment.bias_direction}` };
+  const signedBias = sentiment.institutional_bias > 0 ? `+${sentiment.institutional_bias}` : `${sentiment.institutional_bias}`;
+  try {
+    const result = await drawShape({
+      shape: 'text',
+      point: { time: Math.floor(Date.now() / 1000), price },
+      text: `${style.label} (${sentiment.base_ccy}/${sentiment.quote_ccy}: ${signedBias})`,
+      overrides: { color: style.color },
+      _deps,
+    });
+    return { success: true, pair, chart_symbol: chartSymbol, drawn: true, entity_id: result.entity_id, anchored_price: price, sentiment };
+  } catch (err) {
+    return { success: true, pair, chart_symbol: chartSymbol, drawn: false, error: err.message, sentiment };
+  }
+}

@@ -76,4 +76,19 @@ export function registerJetsonTools(server) {
     try { return jsonResult(await core.annotateKeyLevels({ pair, draw })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
+
+  server.tool('jetson_get_cot_sentiment', 'Get institutional COT (Commitment of Traders) positioning bias for an FX pair — base currency index minus quote currency index, with a LONG_BASE/SHORT_BASE/NEUTRAL direction. Reports available:false (never a fake neutral) when a currency leg\'s weekly report is stale — this is expected for all 7 NZD pairs, which are permanently stale since 2022.', {
+    pair: z.string().describe('FX pair, e.g. "EURUSD"'),
+  }, async ({ pair }) => {
+    try { return jsonResult(await core.getCotSentiment({ pair })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('jetson_annotate_cot_sentiment', 'Draws the current COT institutional bias as a text flag on the live chart (defaulting to whatever symbol is on the chart), anchored near the current price. Pass draw=false to just fetch the sentiment without drawing. Draws nothing (drawn:false) when the sentiment is unavailable/stale rather than drawing a misleading neutral flag.', {
+    pair: z.string().optional().describe('FX pair, e.g. "EURUSD". Omit to use the symbol currently on the live chart.'),
+    draw: z.coerce.boolean().optional().describe('Draw the flag on the chart (default true). Set false to only fetch the data.'),
+  }, async ({ pair, draw }) => {
+    try { return jsonResult(await core.annotateCotSentiment({ pair, draw })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
 }

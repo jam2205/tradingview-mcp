@@ -75,7 +75,8 @@ Jetson pipeline builder bridge (separate live FX data lake, direct Ethernet link
 - jetson_get_live_pairs / jetson_get_live_bars → raw live tick-bar access when you specifically need bars, not a summary (pass summary=true on jetson_get_live_bars for the same distilled readout, scoped to one pair)
 - jetson_annotate_key_levels → gamma exposure walls/magnet + dealer prior day/week high-low + 20D dealer range, drawn straight onto the live chart as horizontal lines in ONE call (defaults to the chart's current symbol). Prefer this over separately fetching levels and calling draw_shape per level.
 - jetson_get_gamma_levels / jetson_get_dealer_levels → the same level data without drawing, if you just need the numbers
-- jetson_get_dataset_catalog / jetson_get_dataset → the other medallion datasets (COT sentiment, vol regime, ML-ready sets, etc.)
+- jetson_annotate_cot_sentiment → institutional COT positioning bias (LONG_BASE/SHORT_BASE/NEUTRAL) drawn as a text flag on the live chart in one call. jetson_get_cot_sentiment for the data alone. NEVER treat a missing/unavailable bias as neutral — it means a currency leg's report is stale (all 7 NZD pairs, permanently), not that positioning is balanced
+- jetson_get_dataset_catalog / jetson_get_dataset → the other medallion datasets (vol regime, ML-ready sets, etc.)
 
 CONTEXT MANAGEMENT:
 - ALWAYS use summary=true on data_get_ohlcv

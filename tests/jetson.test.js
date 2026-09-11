@@ -392,3 +392,140 @@ describe('jetson core — annotateKeyLevels()', () => {
     assert.equal(result.dealer.available, true);
   });
 });
+
+function makeCotRow(overrides = {}) {
+  return {
+    pair: 'EURUSD',
+    base_ccy: 'EUR',
+    quote_ccy: 'USD',
+    base_index: 72.5,
+    quote_index: 38.2,
+    base_commercial_net: -12000,
+    quote_commercial_net: 8000,
+    base_open_interest: 500000,
+    quote_open_interest: 900000,
+    institutional_bias: 0.343,
+    bias_direction: 'LONG_BASE',
+    stale_legs: null,
+    is_complete: true,
+    report_age_days: 4,
+    is_current: true,
+    report_date: new Date('2026-09-01T00:00:00Z'),
+    ...overrides,
+  };
+}
+
+describe('jetson core — getCotSentiment()', () => {
+  afterEach(() => { globalThis.fetch = originalFetch; });
+
+  async function tableFrom(rows) {
+    const { tableFromArrays: tfa } = await import('apache-arrow');
+    const fields = Object.keys(rows[0]);
+    const cols = {};
+    for (const f of fields) cols[f] = rows.map((r) => r[f]);
+    return tfa(cols);
+  }
+
+  it('returns the institutional bias for a complete report', async () => {
+    globalThis.fetch = async () => arrowResponse(await tableFrom([makeCotRow()]));
+    const result = await jetson.getCotSentiment({ pair: 'EURUSD' });
+    assert.equal(result.available, true);
+    assert.equal(result.bias_direction, 'LONG_BASE');
+    assert.equal(result.institutional_bias, 0.343);
+    assert.equal(result.base_ccy, 'EUR');
+  });
+
+  it('keeps only the most recent report_date', async () => {
+    const older = makeCotRow({ report_date: new Date('2026-08-25T00:00:00Z'), institutional_bias: -0.5, bias_direction: 'SHORT_BASE' });
+    const newer = makeCotRow({ report_date: new Date('2026-09-01T00:00:00Z'), institutional_bias: 0.343, bias_direction: 'LONG_BASE' });
+    globalThis.fetch = async () => arrowResponse(await tableFrom([older, newer]));
+    const result = await jetson.getCotSentiment({ pair: 'EURUSD' });
+    assert.equal(result.bias_direction, 'LONG_BASE');
+  });
+
+  it('NEVER coalesces a stale/incomplete leg to a fake neutral — reports available:false with the stale leg named', async () => {
+    const staleRow = makeCotRow({ is_complete: false, institutional_bias: null, bias_direction: null, stale_legs: 'NZD' });
+    globalThis.fetch = async () => arrowResponse(await tableFrom([staleRow]));
+    const result = await jetson.getCotSentiment({ pair: 'NZDUSD' });
+    assert.equal(result.available, false);
+    assert.equal(result.stale_legs, 'NZD');
+    assert.match(result.reason, /stale/);
+    assert.equal(result.bias_direction, undefined); // never fabricated
+  });
+
+  it('also refuses a null bias even if is_complete is (incorrectly) true, as a defensive guard', async () => {
+    const oddRow = makeCotRow({ is_complete: true, institutional_bias: null });
+    globalThis.fetch = async () => arrowResponse(await tableFrom([oddRow]));
+    const result = await jetson.getCotSentiment({ pair: 'EURUSD' });
+    assert.equal(result.available, false);
+  });
+
+  it('reports available:false when the pair has no COT rows at all (empty result set)', async () => {
+    const { tableFromArrays: tfa } = await import('apache-arrow');
+    const empty = tfa({
+      pair: [], base_ccy: [], quote_ccy: [], base_index: [], quote_index: [],
+      base_commercial_net: [], quote_commercial_net: [], base_open_interest: [], quote_open_interest: [],
+      institutional_bias: [], bias_direction: [], stale_legs: [], is_complete: [], report_age_days: [], is_current: [], report_date: [],
+    });
+    globalThis.fetch = async () => arrowResponse(empty);
+    const result = await jetson.getCotSentiment({ pair: 'XXXYYY' });
+    assert.equal(result.available, false);
+    assert.match(result.reason, /No COT sentiment data/);
+  });
+});
+
+describe('jetson core — annotateCotSentiment()', () => {
+  afterEach(() => { globalThis.fetch = originalFetch; });
+
+  async function tableFrom(rows) {
+    const { tableFromArrays: tfa } = await import('apache-arrow');
+    const fields = Object.keys(rows[0]);
+    const cols = {};
+    for (const f of fields) cols[f] = rows.map((r) => r[f]);
+    return tfa(cols);
+  }
+
+  it('draws a text flag anchored to the latest Jetson close for an explicit pair', async () => {
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('cot_pair_sentiment')) return arrowResponse(await tableFrom([makeCotRow()]));
+      if (String(url).includes('live_bars')) return arrowResponse(makeBarsTable({ count: 5 }));
+      return jsonResponse({}, false, 404);
+    };
+    const result = await jetson.annotateCotSentiment({ pair: 'EURUSD', _deps: makeAnnotateDeps() });
+    assert.equal(result.drawn, true);
+    assert.ok(result.entity_id);
+    assert.equal(typeof result.anchored_price, 'number');
+    assert.equal(result.sentiment.bias_direction, 'LONG_BASE');
+  });
+
+  it('does not draw anything when sentiment is unavailable (stale leg)', async () => {
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('cot_pair_sentiment')) return arrowResponse(await tableFrom([makeCotRow({ is_complete: false, institutional_bias: null, stale_legs: 'NZD' })]));
+      return jsonResponse({}, false, 404);
+    };
+    const result = await jetson.annotateCotSentiment({ pair: 'NZDUSD', _deps: makeAnnotateDeps() });
+    assert.equal(result.drawn, false);
+    assert.equal(result.sentiment.available, false);
+  });
+
+  it('defaults to the chart symbol when no pair is given', async () => {
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('cot_pair_sentiment')) return arrowResponse(await tableFrom([makeCotRow({ pair: 'GBPUSD', base_ccy: 'GBP' })]));
+      if (String(url).includes('live_bars')) return arrowResponse(makeBarsTable({ count: 5 }));
+      return jsonResponse({}, false, 404);
+    };
+    const result = await jetson.annotateCotSentiment({ _deps: makeAnnotateDeps({ symbol: 'OANDA:GBPUSD', resolution: '15' }) });
+    assert.equal(result.pair, 'GBPUSD');
+    assert.equal(result.drawn, true);
+  });
+
+  it('draw:false returns the sentiment without touching the chart', async () => {
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('cot_pair_sentiment')) return arrowResponse(await tableFrom([makeCotRow()]));
+      return jsonResponse({}, false, 404);
+    };
+    const result = await jetson.annotateCotSentiment({ pair: 'EURUSD', draw: false, _deps: makeAnnotateDeps() });
+    assert.equal(result.drawn, false);
+    assert.equal(result.sentiment.available, true);
+  });
+});
