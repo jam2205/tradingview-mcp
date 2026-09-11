@@ -529,3 +529,130 @@ describe('jetson core — annotateCotSentiment()', () => {
     assert.equal(result.sentiment.available, true);
   });
 });
+
+function makeRegimeRow(overrides = {}) {
+  return {
+    pair: 'EURUSD',
+    state: 'BULL',
+    timestamp: new Date('2026-09-11T01:00:00Z'),
+    confidence: 0.82,
+    vocabulary: 'directional_v1',
+    ...overrides,
+  };
+}
+
+async function makeRegimeTable(rows) {
+  const { tableFromArrays: tfa } = await import('apache-arrow');
+  const fields = Object.keys(rows[0]);
+  const cols = {};
+  for (const f of fields) cols[f] = rows.map((r) => r[f]);
+  return tfa(cols);
+}
+
+describe('jetson core — getDirectionalRegime() / getVolatilityRegime()', () => {
+  afterEach(() => { globalThis.fetch = originalFetch; });
+
+  it('filters strictly on vocabulary and never mixes the two classifiers', async () => {
+    const rows = [
+      makeRegimeRow({ vocabulary: 'directional_v1', state: 'BULL', timestamp: new Date('2026-09-11T01:00:00Z') }),
+      makeRegimeRow({ vocabulary: 'volatility_phase_v1', state: 'EXPANSION', timestamp: new Date('2026-09-11T01:00:00Z') }),
+    ];
+    globalThis.fetch = async () => arrowResponse(await makeRegimeTable(rows));
+
+    const directional = await jetson.getDirectionalRegime({ pair: 'EURUSD' });
+    assert.equal(directional.available, true);
+    assert.equal(directional.state, 'BULL');
+    assert.equal(directional.vocabulary, 'directional_v1');
+
+    const volatility = await jetson.getVolatilityRegime({ pair: 'EURUSD' });
+    assert.equal(volatility.available, true);
+    assert.equal(volatility.state, 'EXPANSION');
+    assert.equal(volatility.vocabulary, 'volatility_phase_v1');
+  });
+
+  it('keeps only the latest row per vocabulary', async () => {
+    const rows = [
+      makeRegimeRow({ state: 'BEAR', timestamp: new Date('2026-09-10T00:00:00Z') }),
+      makeRegimeRow({ state: 'BULL', timestamp: new Date('2026-09-11T01:00:00Z') }),
+    ];
+    globalThis.fetch = async () => arrowResponse(await makeRegimeTable(rows));
+    const directional = await jetson.getDirectionalRegime({ pair: 'EURUSD' });
+    assert.equal(directional.state, 'BULL');
+  });
+
+  it('flags EXPANSION as the boring base rate but COMPRESSION as a rare/notable reading', async () => {
+    globalThis.fetch = async () => arrowResponse(await makeRegimeTable([makeRegimeRow({ vocabulary: 'volatility_phase_v1', state: 'EXPANSION' })]));
+    const expansion = await jetson.getVolatilityRegime({ pair: 'EURUSD' });
+    assert.match(expansion.note, /base rate/);
+
+    globalThis.fetch = async () => arrowResponse(await makeRegimeTable([makeRegimeRow({ vocabulary: 'volatility_phase_v1', state: 'COMPRESSION' })]));
+    const compression = await jetson.getVolatilityRegime({ pair: 'EURUSD' });
+    assert.match(compression.note, /rare/);
+  });
+
+  it('reports available:false without guessing when a vocabulary has no rows for the pair', async () => {
+    globalThis.fetch = async () => arrowResponse(await makeRegimeTable([makeRegimeRow({ vocabulary: 'directional_v1' })]));
+    const volatility = await jetson.getVolatilityRegime({ pair: 'EURUSD' });
+    assert.equal(volatility.available, false);
+    assert.match(volatility.reason, /volatility_phase_v1/);
+  });
+});
+
+describe('jetson core — annotateRegimeShading()', () => {
+  afterEach(() => { globalThis.fetch = originalFetch; });
+
+  function mockFetchWith(regimeRows) {
+    return async (url) => {
+      if (String(url).includes('markov_regime_log')) return arrowResponse(await makeRegimeTable(regimeRows));
+      if (String(url).includes('live_bars')) return arrowResponse(makeBarsTable({ count: 50 }));
+      return jsonResponse({}, false, 404);
+    };
+  }
+
+  it('draws both a directional background rectangle and a volatility text flag as separate shapes', async () => {
+    globalThis.fetch = mockFetchWith([
+      makeRegimeRow({ vocabulary: 'directional_v1', state: 'BULL' }),
+      makeRegimeRow({ vocabulary: 'volatility_phase_v1', state: 'COMPRESSION' }),
+    ]);
+    const result = await jetson.annotateRegimeShading({ pair: 'EURUSD', _deps: makeAnnotateDeps() });
+    assert.equal(result.drawn, true);
+    assert.equal(result.drawn_shapes.length, 2);
+    assert.equal(result.drawn_shapes[0].type, 'directional_background');
+    assert.equal(result.drawn_shapes[1].type, 'volatility_flag');
+    assert.match(result.note, /orthogonal/);
+  });
+
+  it('still draws the available axis when the other has no data', async () => {
+    globalThis.fetch = mockFetchWith([makeRegimeRow({ vocabulary: 'directional_v1', state: 'SIDEWAYS' })]);
+    const result = await jetson.annotateRegimeShading({ pair: 'EURUSD', _deps: makeAnnotateDeps() });
+    assert.equal(result.drawn, true);
+    assert.equal(result.drawn_shapes.length, 1);
+    assert.equal(result.drawn_shapes[0].type, 'directional_background');
+    assert.equal(result.volatility.available, false);
+  });
+
+  it('drawn:false when neither axis has data, without touching the chart', async () => {
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('markov_regime_log')) return arrowResponse(await makeRegimeTable([makeRegimeRow({ vocabulary: 'some_other_classifier' })]));
+      return jsonResponse({}, false, 404);
+    };
+    const result = await jetson.annotateRegimeShading({ pair: 'EURUSD', _deps: makeAnnotateDeps() });
+    assert.equal(result.drawn, false);
+    assert.equal(result.directional.available, false);
+    assert.equal(result.volatility.available, false);
+  });
+
+  it('defaults to the chart symbol when no pair is given', async () => {
+    globalThis.fetch = mockFetchWith([makeRegimeRow({ pair: 'GBPUSD', vocabulary: 'directional_v1', state: 'BEAR' })]);
+    const result = await jetson.annotateRegimeShading({ _deps: makeAnnotateDeps({ symbol: 'OANDA:GBPUSD', resolution: '15' }) });
+    assert.equal(result.pair, 'GBPUSD');
+    assert.equal(result.drawn, true);
+  });
+
+  it('draw:false returns both regimes without drawing anything', async () => {
+    globalThis.fetch = mockFetchWith([makeRegimeRow({ vocabulary: 'directional_v1', state: 'BULL' })]);
+    const result = await jetson.annotateRegimeShading({ pair: 'EURUSD', draw: false, _deps: makeAnnotateDeps() });
+    assert.equal(result.drawn, false);
+    assert.equal(result.directional.available, true);
+  });
+});

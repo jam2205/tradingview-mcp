@@ -91,4 +91,28 @@ export function registerJetsonTools(server) {
     try { return jsonResult(await core.annotateCotSentiment({ pair, draw })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
+
+  server.tool('jetson_get_directional_regime', 'Get the current directional market regime (BULL/BEAR/SIDEWAYS) for an FX pair from the HMM classifier. This is an independent axis from volatility phase — never combine the two into one label.', {
+    pair: z.string().describe('FX pair, e.g. "EURUSD"'),
+  }, async ({ pair }) => {
+    try { return jsonResult(await core.getDirectionalRegime({ pair })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('jetson_get_volatility_regime', 'Get the current volatility-phase regime (EXPANSION/COMPRESSION/EXHAUSTION) for an FX pair from the HMM classifier. EXPANSION is the base rate (~92% of readings) and is not itself a signal; COMPRESSION/EXHAUSTION are the rare, meaningful readings. Independent axis from directional regime — never combine the two.', {
+    pair: z.string().describe('FX pair, e.g. "EURUSD"'),
+  }, async ({ pair }) => {
+    try { return jsonResult(await core.getVolatilityRegime({ pair })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('jetson_annotate_regime_shading', 'Shades recent price action on the live chart with the directional regime (translucent background rectangle: green=BULL, red=BEAR, gray=SIDEWAYS) and flags the volatility phase separately (text label) — defaulting to whatever symbol is on the chart. These are drawn as two distinct objects because they are orthogonal classifiers, never a combined state. Pass draw=false to just fetch both regimes without drawing.', {
+    pair: z.string().optional().describe('FX pair, e.g. "EURUSD". Omit to use the symbol currently on the live chart.'),
+    draw: z.coerce.boolean().optional().describe('Draw the shading/flag on the chart (default true). Set false to only fetch the data.'),
+    lookbackBars: z.coerce.number().optional().describe('Bars of recent price action to size the shading rectangle against (default 50)'),
+    tf: z.string().optional().describe('Jetson timeframe for sizing the shading band: "1M", "5M", "15M", or "1H" (default "15M")'),
+  }, async ({ pair, draw, lookbackBars, tf }) => {
+    try { return jsonResult(await core.annotateRegimeShading({ pair, draw, lookbackBars, tf })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
 }

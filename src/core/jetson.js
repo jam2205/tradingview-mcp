@@ -600,3 +600,157 @@ export async function annotateCotSentiment({ pair: pairArg, draw = true, _deps }
     return { success: true, pair, chart_symbol: chartSymbol, drawn: false, error: err.message, sentiment };
   }
 }
+
+// markov_regime_log holds TWO independent classifiers in one table,
+// distinguished only by `vocabulary` — the dataset's own description is
+// explicit that these must always be filtered separately and never pooled:
+// they're orthogonal axes (direction vs. volatility phase), not two labels
+// for the same thing, so there is no valid combined enum spanning both.
+const REGIME_AXES = {
+  directional: { vocabulary: 'directional_v1', states: ['BULL', 'BEAR', 'SIDEWAYS'] },
+  volatility: { vocabulary: 'volatility_phase_v1', states: ['EXPANSION', 'COMPRESSION', 'EXHAUSTION'] },
+};
+
+async function getMarkovRegime(pair, axis) {
+  const cfg = REGIME_AXES[axis];
+  const rows = await jetsonFetchArrowRows(`/v1/arrow/markov_regime_log?pair=${encodeURIComponent(pair)}&limit=100`);
+  const filtered = rows.filter((r) => r.vocabulary === cfg.vocabulary);
+  if (!filtered.length) {
+    return { available: false, axis, vocabulary: cfg.vocabulary, reason: `No ${axis} regime rows (vocabulary="${cfg.vocabulary}") for "${pair}".` };
+  }
+  const latest = filtered.reduce((a, b) => (b.timestamp > a.timestamp ? b : a), filtered[0]);
+  return {
+    available: true,
+    axis,
+    vocabulary: cfg.vocabulary,
+    state: latest.state,
+    confidence: round(latest.confidence, 3),
+    timestamp: toIso(latest.timestamp),
+  };
+}
+
+export async function getDirectionalRegime({ pair } = {}) {
+  if (!pair) throw new Error('pair is required (e.g. "EURUSD")');
+  const result = await getMarkovRegime(pair, 'directional');
+  return { success: true, pair, ...result };
+}
+
+// The volatility-phase classifier is heavily skewed — per the dataset's own
+// description, ~92% of readings are EXPANSION and COMPRESSION has fired only
+// 6 times ever. EXPANSION is therefore the boring base rate, not a signal;
+// COMPRESSION/EXHAUSTION are the readings actually worth surfacing. That
+// context ships in the response so an agent doesn't over-react to EXPANSION.
+export async function getVolatilityRegime({ pair } = {}) {
+  if (!pair) throw new Error('pair is required (e.g. "EURUSD")');
+  const result = await getMarkovRegime(pair, 'volatility');
+  const note = !result.available
+    ? undefined
+    : result.state === 'EXPANSION'
+      ? 'EXPANSION is the base rate (~92% of all readings) — this is not itself a signal.'
+      : 'This is a rare reading — COMPRESSION/EXHAUSTION together account for a small fraction of readings vs. EXPANSION.';
+  return { success: true, pair, ...result, ...(note ? { note } : {}) };
+}
+
+const DIRECTIONAL_SHADE_STYLES = {
+  BULL: { fill: 'rgba(16,185,129,0.12)', border: '#10b981' },
+  BEAR: { fill: 'rgba(244,63,94,0.12)', border: '#f43f5e' },
+  SIDEWAYS: { fill: 'rgba(148,163,184,0.12)', border: '#94a3b8' },
+};
+const VOLATILITY_FLAG_COLORS = {
+  EXPANSION: '#64748b',
+  COMPRESSION: '#f59e0b',
+  EXHAUSTION: '#ec4899',
+};
+
+/**
+ * Shades the recent price action with the directional regime (BULL/BEAR/
+ * SIDEWAYS, as a translucent background rectangle) and flags the volatility
+ * phase (EXPANSION/COMPRESSION/EXHAUSTION, as a text label) separately —
+ * deliberately two distinct chart objects, never merged into one, per the
+ * dataset's own warning that these are orthogonal classifiers.
+ */
+export async function annotateRegimeShading({ pair: pairArg, draw = true, lookbackBars = 50, tf = '15M', _deps } = {}) {
+  let pair = pairArg;
+  let chartSymbol = null;
+  if (!pair) {
+    const state = await chart.getState({ _deps });
+    chartSymbol = state.symbol;
+    pair = extractFxPair(chartSymbol);
+    if (!pair) {
+      return {
+        success: true,
+        chart_symbol: chartSymbol,
+        drawn: false,
+        reason: `Chart symbol "${chartSymbol}" doesn't look like an FX pair. Pass pair explicitly to annotate a symbol the chart isn't currently on.`,
+      };
+    }
+  }
+
+  const [directional, volatility] = await Promise.all([getDirectionalRegime({ pair }), getVolatilityRegime({ pair })]);
+
+  if (!draw || (!directional.available && !volatility.available)) {
+    return { success: true, pair, chart_symbol: chartSymbol, drawn: false, directional, volatility };
+  }
+
+  let bars;
+  try {
+    bars = await jetsonFetchArrowRows(`/v1/arrow/live_bars?pair=${encodeURIComponent(pair)}&tf=${encodeURIComponent(tf)}&limit=${lookbackBars}`);
+  } catch (err) {
+    return { success: true, pair, chart_symbol: chartSymbol, drawn: false, directional, volatility, reason: `Could not fetch bars to size the shading band: ${err.message}` };
+  }
+  if (!bars.length) {
+    return { success: true, pair, chart_symbol: chartSymbol, drawn: false, directional, volatility, reason: 'No bars available to size the shading band.' };
+  }
+
+  const top = Math.max(...bars.map((b) => b.high)) * 1.0015;
+  const bottom = Math.min(...bars.map((b) => b.low)) * 0.9985;
+  const startTimeSec = Math.floor(bars[0].time / 1000);
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  const drawnShapes = [];
+  const failed = [];
+
+  if (directional.available) {
+    const style = DIRECTIONAL_SHADE_STYLES[directional.state] || { fill: 'rgba(148,163,184,0.12)', border: '#94a3b8' };
+    try {
+      const rect = await drawShape({
+        shape: 'rectangle',
+        point: { time: startTimeSec, price: top },
+        point2: { time: nowSec, price: bottom },
+        text: `Regime: ${directional.state} (${Math.round((directional.confidence ?? 0) * 100)}%)`,
+        overrides: { color: style.fill, backgroundColor: style.fill, linecolor: style.border, transparency: 80 },
+        _deps,
+      });
+      drawnShapes.push({ type: 'directional_background', state: directional.state, entity_id: rect.entity_id });
+    } catch (err) {
+      failed.push({ type: 'directional_background', error: err.message });
+    }
+  }
+
+  if (volatility.available) {
+    try {
+      const label = await drawShape({
+        shape: 'text',
+        point: { time: nowSec, price: top },
+        text: `Vol Phase: ${volatility.state}${volatility.state !== 'EXPANSION' ? ' (rare)' : ''}`,
+        overrides: { color: VOLATILITY_FLAG_COLORS[volatility.state] || '#94a3b8' },
+        _deps,
+      });
+      drawnShapes.push({ type: 'volatility_flag', state: volatility.state, entity_id: label.entity_id });
+    } catch (err) {
+      failed.push({ type: 'volatility_flag', error: err.message });
+    }
+  }
+
+  return {
+    success: true,
+    pair,
+    chart_symbol: chartSymbol,
+    drawn: drawnShapes.length > 0,
+    drawn_shapes: drawnShapes,
+    failed_shapes: failed.length ? failed : undefined,
+    directional,
+    volatility,
+    note: 'directional (BULL/BEAR/SIDEWAYS) and volatility (EXPANSION/COMPRESSION/EXHAUSTION) are independent, orthogonal classifiers — never combine them into one label.',
+  };
+}
