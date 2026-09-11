@@ -754,3 +754,122 @@ export async function annotateRegimeShading({ pair: pairArg, draw = true, lookba
     note: 'directional (BULL/BEAR/SIDEWAYS) and volatility (EXPANSION/COMPRESSION/EXHAUSTION) are independent, orthogonal classifiers — never combine them into one label.',
   };
 }
+
+/**
+ * The top-level per-pair confluence call. Per the dataset's own description,
+ * two things must never be misrepresented here: `agreement` (e.g. "2/4") has
+ * a denominator that moves with how many layers are currently damped
+ * out/stale, so it's meaningless without n_layers/n_layers_stale alongside
+ * it; and the blend weight is a fusion weighting, NOT a probability of the
+ * call being correct — it is named blend_weight here, deliberately not
+ * "confidence", so nothing downstream is tempted to render it as one.
+ */
+export async function getConfluence({ pair } = {}) {
+  if (!pair) throw new Error('pair is required (e.g. "EURUSD")');
+  const rows = await jetsonFetchArrowRows(`/v1/arrow/confluence?pair=${encodeURIComponent(pair)}&limit=5`);
+  if (!rows.length) {
+    return { success: true, pair, available: false, reason: `No confluence data for "${pair}".` };
+  }
+  const row = rows.reduce((latest, r) => (r.generated_at > latest.generated_at ? r : latest), rows[0]);
+  return {
+    success: true,
+    pair,
+    available: true,
+    generated_at: toIso(row.generated_at),
+    draw_direction: row.draw_direction,
+    strength: round(row.strength, 3),
+    agreement: row.agreement,
+    n_layers: row.n_layers,
+    n_layers_stale: row.n_layers_stale,
+    n_layers_fresh: row.n_layers - row.n_layers_stale,
+    blend_weight: round(row.draw_confidence, 3),
+    today_high_impact: row.today_high_impact,
+    week_high_events: row.week_high_events,
+    event_flags: row.event_flags,
+    conflicts: row.conflicts,
+    molding: row.molding,
+    note: 'blend_weight is a fusion blend weight, not a probability of the call being correct. agreement\'s denominator moves with n_layers_stale — treat "2/4 agreement, 2 stale" as much weaker than "2/4 agreement, 0 stale".',
+  };
+}
+
+/**
+ * The per-layer breakdown behind a confluence call — per the dataset's own
+ * description, "this is the half worth rendering": it shows WHY a call is
+ * weak (which layers are stale/damped) instead of only how strong it
+ * claims to be. A damped_weight of 0.0 is expected freshness damping, not
+ * missing data.
+ */
+export async function getConfluenceLayers({ pair } = {}) {
+  if (!pair) throw new Error('pair is required (e.g. "EURUSD")');
+  const rows = await jetsonFetchArrowRows(`/v1/arrow/confluence_layers?pair=${encodeURIComponent(pair)}&limit=50`);
+  if (!rows.length) {
+    return { success: true, pair, available: false, reason: `No confluence layer breakdown for "${pair}".` };
+  }
+  const latestRun = rows.reduce((max, r) => (r.generated_at > max ? r.generated_at : max), rows[0].generated_at);
+  const layers = rows
+    .filter((r) => r.generated_at === latestRun)
+    .map((r) => ({
+      layer: r.layer,
+      direction: r.direction,
+      weight: round(r.weight, 3),
+      damped_weight: round(r.damped_weight, 3),
+      age_h: round(r.age_h, 2),
+      stale: r.stale,
+    }));
+  return { success: true, pair, available: true, generated_at: toIso(latestRun), layers };
+}
+
+// Verified live against the real feed: draw_direction/layer direction values
+// are UP/DOWN/NEUTRAL, not BULLISH/BEARISH.
+const CONFLUENCE_DIRECTION_COLORS = { UP: '#10b981', DOWN: '#f43f5e', NEUTRAL: '#94a3b8' };
+
+/**
+ * Draws the confluence call as a text badge on the live chart, anchored to
+ * the pair's latest Jetson close, deliberately surfacing staleness in the
+ * badge text itself (not just the underlying data) so a weak call still
+ * looks weak on the chart, not just in a JSON field nobody reads.
+ */
+export async function annotateConfluenceBadge({ pair: pairArg, draw = true, _deps } = {}) {
+  let pair = pairArg;
+  let chartSymbol = null;
+  if (!pair) {
+    const state = await chart.getState({ _deps });
+    chartSymbol = state.symbol;
+    pair = extractFxPair(chartSymbol);
+    if (!pair) {
+      return {
+        success: true,
+        chart_symbol: chartSymbol,
+        drawn: false,
+        reason: `Chart symbol "${chartSymbol}" doesn't look like an FX pair. Pass pair explicitly to annotate a symbol the chart isn't currently on.`,
+      };
+    }
+  }
+
+  const confluence = await getConfluence({ pair });
+  if (!draw || !confluence.available) {
+    return { success: true, pair, chart_symbol: chartSymbol, drawn: false, confluence };
+  }
+
+  const price = await getLatestClose(pair);
+  if (price == null) {
+    return { success: true, pair, chart_symbol: chartSymbol, drawn: false, confluence, reason: 'Could not fetch a current price from the Jetson feed to anchor the badge.' };
+  }
+
+  const color = CONFLUENCE_DIRECTION_COLORS[confluence.draw_direction] || '#94a3b8';
+  const staleSuffix = confluence.n_layers_stale > 0 ? ` [${confluence.n_layers_stale}/${confluence.n_layers} layers stale]` : '';
+  const text = `Confluence: ${confluence.draw_direction} (${confluence.agreement} agree, wt ${confluence.blend_weight})${staleSuffix}`;
+
+  try {
+    const result = await drawShape({
+      shape: 'text',
+      point: { time: Math.floor(Date.now() / 1000), price },
+      text,
+      overrides: { color },
+      _deps,
+    });
+    return { success: true, pair, chart_symbol: chartSymbol, drawn: true, entity_id: result.entity_id, anchored_price: price, confluence };
+  } catch (err) {
+    return { success: true, pair, chart_symbol: chartSymbol, drawn: false, error: err.message, confluence };
+  }
+}

@@ -656,3 +656,136 @@ describe('jetson core — annotateRegimeShading()', () => {
     assert.equal(result.directional.available, true);
   });
 });
+
+function makeConfluenceRow(overrides = {}) {
+  return {
+    generated_at: new Date('2026-09-11T02:00:00Z'),
+    pair: 'EURUSD',
+    draw_direction: 'UP',
+    draw_confidence: 0.61,
+    strength: 0.72,
+    agreement: '2/4',
+    n_layers: 4,
+    n_layers_stale: 0,
+    today_high_impact: false,
+    week_high_events: 1,
+    event_flags: 'none',
+    conflicts: 'none',
+    molding: 'trend_following',
+    ...overrides,
+  };
+}
+
+function makeConfluenceLayerRow(overrides = {}) {
+  return {
+    generated_at: new Date('2026-09-11T02:00:00Z'),
+    pair: 'EURUSD',
+    layer: 'momentum',
+    direction: 'UP',
+    weight: 0.5,
+    damped_weight: 0.5,
+    age_h: 1.0,
+    stale: false,
+    evidence: 'ema_cross',
+    ...overrides,
+  };
+}
+
+async function makeTableFromRows(rows) {
+  const { tableFromArrays: tfa } = await import('apache-arrow');
+  const fields = Object.keys(rows[0]);
+  const cols = {};
+  for (const f of fields) cols[f] = rows.map((r) => r[f]);
+  return tfa(cols);
+}
+
+describe('jetson core — getConfluence() / getConfluenceLayers()', () => {
+  afterEach(() => { globalThis.fetch = originalFetch; });
+
+  it('getConfluence returns the headline call with staleness context, never labeling blend_weight a probability', async () => {
+    globalThis.fetch = async () => arrowResponse(await makeTableFromRows([makeConfluenceRow()]));
+    const result = await jetson.getConfluence({ pair: 'EURUSD' });
+    assert.equal(result.available, true);
+    assert.equal(result.draw_direction, 'UP');
+    assert.equal(result.agreement, '2/4');
+    assert.equal(result.n_layers, 4);
+    assert.equal(result.n_layers_stale, 0);
+    assert.equal(result.n_layers_fresh, 4);
+    assert.equal(result.blend_weight, 0.61);
+    assert.match(result.note, /not a probability/);
+  });
+
+  it('getConfluence keeps only the latest generated_at run', async () => {
+    const older = makeConfluenceRow({ generated_at: new Date('2026-09-10T00:00:00Z'), draw_direction: 'DOWN' });
+    const newer = makeConfluenceRow({ generated_at: new Date('2026-09-11T02:00:00Z'), draw_direction: 'UP' });
+    globalThis.fetch = async () => arrowResponse(await makeTableFromRows([older, newer]));
+    const result = await jetson.getConfluence({ pair: 'EURUSD' });
+    assert.equal(result.draw_direction, 'UP');
+  });
+
+  it('getConfluence reports available:false for a pair with no confluence rows', async () => {
+    const { tableFromArrays: tfa } = await import('apache-arrow');
+    const empty = tfa({
+      generated_at: [], pair: [], draw_direction: [], draw_confidence: [], strength: [], agreement: [],
+      n_layers: [], n_layers_stale: [], today_high_impact: [], week_high_events: [], event_flags: [], conflicts: [], molding: [],
+    });
+    globalThis.fetch = async () => arrowResponse(empty);
+    const result = await jetson.getConfluence({ pair: 'EURUSD' });
+    assert.equal(result.available, false);
+  });
+
+  it('getConfluenceLayers returns only the most recent run\'s layers, preserving damped_weight:0 as-is', async () => {
+    const rows = [
+      makeConfluenceLayerRow({ layer: 'momentum', damped_weight: 0.5 }),
+      makeConfluenceLayerRow({ layer: 'seasonality', damped_weight: 0, stale: true, age_h: 200 }),
+    ];
+    globalThis.fetch = async () => arrowResponse(await makeTableFromRows(rows));
+    const result = await jetson.getConfluenceLayers({ pair: 'EURUSD' });
+    assert.equal(result.available, true);
+    assert.equal(result.layers.length, 2);
+    const seasonality = result.layers.find((l) => l.layer === 'seasonality');
+    assert.equal(seasonality.damped_weight, 0);
+    assert.equal(seasonality.stale, true);
+  });
+});
+
+describe('jetson core — annotateConfluenceBadge()', () => {
+  afterEach(() => { globalThis.fetch = originalFetch; });
+
+  function mockFetchWith(confluenceRows) {
+    return async (url) => {
+      if (String(url).includes('/v1/arrow/confluence?') || String(url).includes('/v1/arrow/confluence&')) return arrowResponse(await makeTableFromRows(confluenceRows));
+      if (String(url).includes('live_bars')) return arrowResponse(makeBarsTable({ count: 5 }));
+      return jsonResponse({}, false, 404);
+    };
+  }
+
+  it('draws a badge whose text surfaces staleness explicitly', async () => {
+    globalThis.fetch = mockFetchWith([makeConfluenceRow({ n_layers: 4, n_layers_stale: 2 })]);
+    const result = await jetson.annotateConfluenceBadge({ pair: 'EURUSD', _deps: makeAnnotateDeps() });
+    assert.equal(result.drawn, true);
+    assert.ok(result.entity_id);
+    assert.equal(result.confluence.n_layers_stale, 2);
+  });
+
+  it('does not draw when confluence is unavailable', async () => {
+    globalThis.fetch = async () => jsonResponse({}, false, 404);
+    // A 404 makes jetsonFetchArrowRows throw; getConfluence doesn't catch it,
+    // so annotateConfluenceBadge should propagate rather than silently drawing.
+    await assert.rejects(() => jetson.annotateConfluenceBadge({ pair: 'EURUSD', _deps: makeAnnotateDeps() }));
+  });
+
+  it('defaults to the chart symbol when no pair is given', async () => {
+    globalThis.fetch = mockFetchWith([makeConfluenceRow({ pair: 'GBPUSD' })]);
+    const result = await jetson.annotateConfluenceBadge({ _deps: makeAnnotateDeps({ symbol: 'OANDA:GBPUSD', resolution: '15' }) });
+    assert.equal(result.pair, 'GBPUSD');
+    assert.equal(result.drawn, true);
+  });
+
+  it('draw:false returns the confluence data without drawing anything', async () => {
+    globalThis.fetch = mockFetchWith([makeConfluenceRow()]);
+    const result = await jetson.annotateConfluenceBadge({ pair: 'EURUSD', draw: false, _deps: makeAnnotateDeps() });
+    assert.equal(result.drawn, false);
+    assert.equal(result.confluence.available, true);
+  });
+});

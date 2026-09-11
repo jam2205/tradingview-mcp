@@ -115,4 +115,26 @@ export function registerJetsonTools(server) {
     try { return jsonResult(await core.annotateRegimeShading({ pair, draw, lookbackBars, tf })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
+
+  server.tool('jetson_get_confluence', 'Get the multi-layer confluence call for an FX pair: direction, strength, agreement, and staleness. blend_weight is a fusion weighting, NOT a probability of the call being correct — never present it as one. agreement\'s denominator moves with n_layers_stale, so always read it alongside n_layers/n_layers_stale, not as a fixed scale.', {
+    pair: z.string().describe('FX pair, e.g. "EURUSD"'),
+  }, async ({ pair }) => {
+    try { return jsonResult(await core.getConfluence({ pair })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('jetson_get_confluence_layers', 'Get the per-layer breakdown behind an FX pair\'s confluence call (which contributing models/layers agree, their weight, damped_weight, age, and staleness). This explains WHY a call is weak or strong, not just its headline number — a damped_weight of 0 is expected freshness damping, not missing data.', {
+    pair: z.string().describe('FX pair, e.g. "EURUSD"'),
+  }, async ({ pair }) => {
+    try { return jsonResult(await core.getConfluenceLayers({ pair })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('jetson_annotate_confluence_badge', 'Draws the multi-layer confluence call as a text badge on the live chart (defaulting to whatever symbol is on the chart), anchored near current price, with layer staleness surfaced directly in the badge text. Pass draw=false to just fetch the confluence without drawing.', {
+    pair: z.string().optional().describe('FX pair, e.g. "EURUSD". Omit to use the symbol currently on the live chart.'),
+    draw: z.coerce.boolean().optional().describe('Draw the badge on the chart (default true). Set false to only fetch the data.'),
+  }, async ({ pair, draw }) => {
+    try { return jsonResult(await core.annotateConfluenceBadge({ pair, draw })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
 }
