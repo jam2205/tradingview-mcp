@@ -1,0 +1,18 @@
+[Unit]
+Description=TradingView MCP server (always-on, Streamable HTTP transport)
+After=graphical-session.target tradingview-cdp.service
+Wants=tradingview-cdp.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/tradingview-mcp/scripts/systemd/run_mcp_http.sh
+Restart=on-failure
+RestartSec=5
+Environment=TV_MCP_HTTP_HOST=127.0.0.1
+Environment=TV_MCP_HTTP_PORT=8787
+Environment=TV_CDP_PORT=9222
+Environment=JETSON_BASE_URL=http://10.10.10.1:8769
+
+[Install]
+WantedBy=graphical-session.target

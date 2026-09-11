@@ -1,0 +1,15 @@
+[Unit]
+Description=TradingView Desktop with Chrome DevTools Protocol enabled
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/tradingview-mcp/scripts/systemd/launch_tv_service.sh
+Restart=on-failure
+RestartSec=5
+Environment=TV_CDP_PORT=9222
+Environment=TV_LAUNCH_WATCHDOG_S=20
+
+[Install]
+WantedBy=graphical-session.target

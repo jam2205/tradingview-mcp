@@ -110,6 +110,51 @@ npm link
 
 Then `tv status`, `tv quote`, `tv pine compile`, etc. work from anywhere.
 
+## Always-On Setup (Linux, systemd) — Optional
+
+By default the MCP server is spawned per Claude session (stdio transport) and TradingView Desktop must be launched manually or via `tv_launch`. For a machine that should have TradingView + the MCP bridge already running and reachable the moment Claude starts — e.g. this desktop, which also bridges a Jetson pipeline builder over a direct Ethernet link — run the server as an always-on **Streamable HTTP** service instead, with TradingView Desktop auto-started on login.
+
+### 1. Install the systemd --user units
+
+```bash
+cd ~/tradingview-mcp
+./scripts/systemd/install.sh
+```
+
+This copies `tradingview-cdp.service` and `tradingview-mcp-http.service` into `~/.config/systemd/user/` and reloads the daemon, but does **not** enable or start them yet — review the unit files first (they assume the repo lives at `~/tradingview-mcp`; edit the `ExecStart` paths if yours is elsewhere).
+
+### 2. Enable and start
+
+```bash
+systemctl --user enable --now tradingview-cdp.service tradingview-mcp-http.service
+```
+
+Or run `./scripts/systemd/install.sh --enable` to do both steps at once.
+
+### 3. Point Claude at the URL instead of a command
+
+Claude Code CLI:
+```bash
+claude mcp add --transport http tradingview http://127.0.0.1:8787/mcp
+```
+
+Or in `.mcp.json` / Claude Desktop config, use `url` instead of `command`/`args`:
+```json
+{
+  "mcpServers": {
+    "tradingview": { "url": "http://127.0.0.1:8787/mcp" }
+  }
+}
+```
+
+### Known caveat: KDE `xdg-settings` hang
+
+On at least one KDE Plasma machine, TradingView's own startup synchronously calls `xdg-settings set default-url-scheme-handler` to register its URL scheme, which shells out to KDE's `ktraderclient5` — and that call has been observed to hang **indefinitely** (not slow — genuinely never returns), blocking TradingView's own startup and CDP from ever coming up. `launch_tv_service.sh` includes a watchdog: if CDP isn't reachable within `TV_LAUNCH_WATCHDOG_S` seconds (default 20), it kills any stuck `xdg-settings`/`xdg-mime`/`ktraderclient5` process and TradingView resumes immediately. If TradingView still won't launch under systemd, check `journalctl --user -u tradingview-cdp.service` for this signature.
+
+### Security note
+
+`server-http.js` binds to `127.0.0.1` only and refuses to start on any other host — it has no authentication. Do not put it behind a reverse proxy or expose it on a non-loopback interface without adding auth in front of it first.
+
 ## Troubleshooting
 
 | Problem | Solution |
