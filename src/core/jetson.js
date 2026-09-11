@@ -90,6 +90,32 @@ const jetsonFetchArrowRows = (pathAndQuery) => jetsonRequest(pathAndQuery, async
   });
 });
 
+// The live_bars ring buffer holds a fixed WALL-CLOCK window per timeframe,
+// not a fixed bar count — verified live against the real feed: ~10 bars for
+// 1H, ~33 for 15M, ~94 for 5M, no cap observed for 1M at 200. Requesting more
+// bars than fit in that window doesn't error or just return fewer rows: the
+// API prepends the in-progress current bar and returns the rest out of
+// chronological order (reproducible, confirmed across repeated fetches), so
+// every live_bars caller sorts and de-duplicates by time rather than
+// trusting response order. Without this, summarizeBars()'s period/change_pct
+// silently read the wrong "first" bar whenever a request exceeded the
+// buffer for that timeframe (i.e. the default limits/lookbacks used
+// everywhere in this file, for anything above 1M).
+function sortAndDedupeByTime(rows) {
+  const sorted = [...rows].sort((a, b) => a.time - b.time);
+  const seen = new Set();
+  return sorted.filter((r) => {
+    if (seen.has(r.time)) return false;
+    seen.add(r.time);
+    return true;
+  });
+}
+
+async function fetchLiveBars(pair, tf, limit) {
+  const rows = await jetsonFetchArrowRows(`/v1/arrow/live_bars?pair=${encodeURIComponent(pair)}&tf=${encodeURIComponent(tf)}&limit=${limit}`);
+  return sortAndDedupeByTime(rows);
+}
+
 const round = (v, dp = 5) => (v == null || Number.isNaN(v) ? null : Math.round(v * 10 ** dp) / 10 ** dp);
 
 // Arrow timestamp columns come back from apache-arrow as raw epoch-ms
@@ -201,7 +227,7 @@ export async function getLiveBars({ pair, tf, limit, summary } = {}) {
   if (!pair) throw new Error('pair is required (e.g. "EURUSD")');
   const timeframe = tf || '1M';
   const n = Math.min(limit || 100, MAX_LIVE_BARS);
-  const rows = await jetsonFetchArrowRows(`/v1/arrow/live_bars?pair=${encodeURIComponent(pair)}&tf=${encodeURIComponent(timeframe)}&limit=${n}`);
+  const rows = await fetchLiveBars(pair, timeframe, n);
   if (!rows.length) throw new Error(`No live bars returned for ${pair} ${timeframe}`);
 
   if (summary) return { success: true, pair, tf: timeframe, ...summarizeBars(rows) };
@@ -237,7 +263,7 @@ export async function getSynthesizedContext({ pairs, tf, bars } = {}) {
   const results = [];
   for (const pair of targets) {
     try {
-      const rows = await jetsonFetchArrowRows(`/v1/arrow/live_bars?pair=${encodeURIComponent(pair)}&tf=${encodeURIComponent(timeframe)}&limit=${lookback}`);
+      const rows = await fetchLiveBars(pair, timeframe, lookback);
       results.push({ pair, ...summarizeBars(rows) });
     } catch (err) {
       results.push({ pair, error: err.message });
@@ -495,7 +521,7 @@ export async function annotateKeyLevels({ pair: pairArg, draw = true, _deps } = 
 }
 
 async function getLatestClose(pair, tf = '15M') {
-  const rows = await jetsonFetchArrowRows(`/v1/arrow/live_bars?pair=${encodeURIComponent(pair)}&tf=${encodeURIComponent(tf)}&limit=2`);
+  const rows = await fetchLiveBars(pair, tf, 2);
   if (!rows.length) return null;
   return rows[rows.length - 1].close;
 }
@@ -694,7 +720,7 @@ export async function annotateRegimeShading({ pair: pairArg, draw = true, lookba
 
   let bars;
   try {
-    bars = await jetsonFetchArrowRows(`/v1/arrow/live_bars?pair=${encodeURIComponent(pair)}&tf=${encodeURIComponent(tf)}&limit=${lookbackBars}`);
+    bars = await fetchLiveBars(pair, tf, lookbackBars);
   } catch (err) {
     return { success: true, pair, chart_symbol: chartSymbol, drawn: false, directional, volatility, reason: `Could not fetch bars to size the shading band: ${err.message}` };
   }
