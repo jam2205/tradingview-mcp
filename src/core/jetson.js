@@ -1100,9 +1100,55 @@ function summarizeSeasonalityBucket(b) {
  * and most of Sunday legitimately have ~0 samples — reported as n:0, not
  * hidden or backfilled.
  */
+// Parses the weekly_profile confluence layer's structured evidence string
+// (e.g. "week_profile quiet_week: bias=+0.374, events_high=0, computed=2026-09-11")
+// into fields. Falls back to the raw string if the shape doesn't match —
+// this is free-text evidence, not a stable API contract.
+function parseWeeklyProfileEvidence(evidence) {
+  if (!evidence) return {};
+  const m = /week_profile\s+(\w+):\s*bias=([+-]?[\d.]+),\s*events_high=(\d+)/.exec(evidence);
+  if (!m) return { evidence_raw: evidence };
+  return { week_tag: m[1], model_bias: Number(m[2]), high_impact_events_this_week: Number(m[3]) };
+}
+
+/**
+ * The confluence system's own weekly-seasonality call — the `weekly_profile`
+ * layer inside confluence_layers, with its CURRENT trust weighting
+ * (damped_weight vs base weight — freshness-damped, not a fixed number).
+ * This is a different kind of "seasonal" signal from getSeasonality()'s
+ * per-weekday historical average: this is the model's live bias for THIS
+ * week specifically (quiet vs event-heavy), not a multi-week average for a
+ * given day of the week. Complementary, not interchangeable — reported
+ * alongside the historical stat, never blended into it (the two aren't on
+ * a common scale, so a single fabricated composite number would be false
+ * precision).
+ */
+async function getWeeklyProfileLayer(pair) {
+  const rows = await jetsonFetchArrowRows(`/v1/arrow/confluence_layers?pair=${encodeURIComponent(pair)}&limit=50`);
+  if (!rows.length) return { available: false, reason: `No confluence layer data for "${pair}".` };
+  const latestRun = rows.reduce((max, r) => (r.generated_at > max ? r.generated_at : max), rows[0].generated_at);
+  const wp = rows.find((r) => r.generated_at === latestRun && r.layer === 'weekly_profile');
+  if (!wp) return { available: false, reason: `No weekly_profile layer in the latest confluence run for "${pair}".` };
+  return {
+    available: true,
+    direction: wp.direction,
+    weight: round(wp.weight, 3),
+    damped_weight: round(wp.damped_weight, 3),
+    trust_ratio: wp.weight ? round(wp.damped_weight / wp.weight, 3) : null,
+    age_h: round(wp.age_h, 2),
+    stale: wp.stale,
+    generated_at: toIso(latestRun),
+    ...parseWeeklyProfileEvidence(wp.evidence),
+  };
+}
+
 export async function getSeasonality({ pair, lookbackDays = 180 } = {}) {
   if (!pair) throw new Error('pair is required (e.g. "EURUSD")');
-  const rows = sortAndDedupeByTime(await jetsonFetchArrowRows(`/v1/arrow/candles_1h?pair=${encodeURIComponent(pair)}&limit=${MAX_SEASONALITY_BARS}`));
+  const [rowsRaw, weeklyProfile] = await Promise.all([
+    jetsonFetchArrowRows(`/v1/arrow/candles_1h?pair=${encodeURIComponent(pair)}&limit=${MAX_SEASONALITY_BARS}`),
+    getWeeklyProfileLayer(pair).catch((err) => ({ available: false, reason: err.message })),
+  ]);
+  const rows = sortAndDedupeByTime(rowsRaw);
   if (!rows.length) {
     return { success: true, pair, available: false, reason: `No candles_1h history for "${pair}".` };
   }
@@ -1133,6 +1179,19 @@ export async function getSeasonality({ pair, lookbackDays = 180 } = {}) {
     }
   }
 
+  const byDayOfWeek = DOW_NAMES.map((day, i) => ({ day, ...summarizeSeasonalityBucket(byDow[i]) }));
+  const todayStats = byDayOfWeek[new Date().getUTCDay()];
+
+  // Directional agreement between MY historical read for today's weekday and
+  // the confluence system's live weekly bias — reported as a flag, not
+  // folded into either number, since one is a multi-week weekday average
+  // and the other is a this-week-specific model call.
+  let todayVsConfluenceAgreement = null;
+  if (weeklyProfile.available && todayStats.n && (weeklyProfile.direction === 'UP' || weeklyProfile.direction === 'DOWN')) {
+    const historicalDir = todayStats.avg_return_pct > 0 ? 'UP' : todayStats.avg_return_pct < 0 ? 'DOWN' : 'FLAT';
+    todayVsConfluenceAgreement = historicalDir === 'FLAT' ? 'N/A' : historicalDir === weeklyProfile.direction ? 'AGREE' : 'DIFFER';
+  }
+
   return {
     success: true,
     pair,
@@ -1141,8 +1200,10 @@ export async function getSeasonality({ pair, lookbackDays = 180 } = {}) {
     lookback_days: lookbackDays,
     sample_bars: sample.length,
     note: 'day-of-week buckets use UTC calendar days, not the FX 17:00 EST trading-day rollover. Saturday/most-Sunday buckets have ~0 samples by design (market closed), not missing data. Weigh small-n buckets proportionately.',
-    by_day_of_week: DOW_NAMES.map((day, i) => ({ day, ...summarizeSeasonalityBucket(byDow[i]) })),
+    by_day_of_week: byDayOfWeek,
     by_hour_utc: byHour.map((b, hour_utc) => ({ hour_utc, ...summarizeSeasonalityBucket(b) })),
+    confluence_weekly_profile: weeklyProfile,
+    today_vs_confluence_agreement: todayVsConfluenceAgreement,
   };
 }
 
@@ -1193,14 +1254,38 @@ export async function annotateSeasonality({ pair: pairArg, draw = true, lookback
   }
 
   const sign = todayStats.avg_return_pct >= 0 ? '+' : '';
-  const text = `Seasonality (${todayStats.day}, n=${todayStats.n}): avg ${sign}${todayStats.avg_return_pct}%, avg range ${todayStats.avg_range}`;
+  let text = `Seasonality (${todayStats.day}, n=${todayStats.n}): avg ${sign}${todayStats.avg_return_pct}%, avg range ${todayStats.avg_range}`;
+
+  // Weave in the confluence system's own weekly_profile call and its
+  // CURRENT trust weighting (damped_weight/weight — freshness-damped, not a
+  // fixed number) rather than reporting the historical average in
+  // isolation. Never collapsed into one fabricated composite score — the
+  // two are different timeframes (multi-week weekday average vs. this-
+  // week's model bias) on different scales.
+  const wp = seasonality.confluence_weekly_profile;
+  if (wp?.available) {
+    const trustPct = wp.trust_ratio != null ? Math.round(wp.trust_ratio * 100) : null;
+    const biasStr = wp.model_bias != null ? ` ${wp.model_bias >= 0 ? '+' : ''}${wp.model_bias}` : '';
+    const trustStr = trustPct != null ? ` (trust ${trustPct}%${wp.stale ? ', stale' : ''})` : '';
+    const agreementStr = seasonality.today_vs_confluence_agreement && seasonality.today_vs_confluence_agreement !== 'N/A'
+      ? ` [${seasonality.today_vs_confluence_agreement}]`
+      : '';
+    text += ` | Model week bias: ${wp.direction}${biasStr}${trustStr}${agreementStr}`;
+  }
+
+  // Signals conflicting directionally get an amber flag instead of the
+  // usual up/down green/red — the disagreement itself is the useful signal
+  // there, not whichever side "wins" a fabricated tiebreak.
+  const color = seasonality.today_vs_confluence_agreement === 'DIFFER'
+    ? '#f59e0b'
+    : (todayStats.avg_return_pct >= 0 ? '#10b981' : '#f43f5e');
 
   try {
     const result = await drawShape({
       shape: 'text',
       point: { time: Math.floor(Date.now() / 1000), price },
       text,
-      overrides: { color: todayStats.avg_return_pct >= 0 ? '#10b981' : '#f43f5e' },
+      overrides: { color },
       _deps,
     });
     return { success: true, pair, chart_symbol: chartSymbol, drawn: true, entity_id: result.entity_id, anchored_price: price, seasonality };

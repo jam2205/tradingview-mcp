@@ -160,7 +160,7 @@ export function registerJetsonTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('jetson_get_seasonality', 'Get real day-of-week / hour-of-day (UTC) seasonality statistics for an FX pair — NOT a native Jetson dataset, computed here from real candles_1h history (the only "seasonality-shaped" Jetson columns live in the dead, superseded enriched_signals dataset, which must never be used as a live signal). Every average carries its sample size (n) — weigh small-n buckets proportionately. Saturday/most-Sunday buckets legitimately have n:0 (market closed).', {
+  server.tool('jetson_get_seasonality', 'Get real day-of-week / hour-of-day (UTC) seasonality statistics for an FX pair — NOT a native Jetson dataset, computed here from real candles_1h history (the only "seasonality-shaped" Jetson columns live in the dead, superseded enriched_signals dataset, which must never be used as a live signal). Every average carries its sample size (n) — weigh small-n buckets proportionately. Saturday/most-Sunday buckets legitimately have n:0 (market closed). Also cross-references confluence_weekly_profile — the multi-layer confluence system\'s own THIS-WEEK bias call, with its current trust weighting (damped_weight/weight, staleness) — and flags today_vs_confluence_agreement (AGREE/DIFFER/N/A). The two are complementary (multi-week weekday average vs. this-week model call), never blended into one number.', {
     pair: z.string().describe('FX pair, e.g. "EURUSD"'),
     lookbackDays: z.coerce.number().optional().describe('Days of candles_1h history to compute over (default 180, max ~208 available per request)'),
   }, async ({ pair, lookbackDays }) => {
@@ -168,7 +168,7 @@ export function registerJetsonTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('jetson_annotate_seasonality', 'Draws today\'s (UTC) day-of-week seasonal read (avg return, avg range, sample size) as a text flag on the live chart — defaulting to whatever symbol is on the chart. Computed from real candles_1h history, not a native Jetson feed. Refuses to draw (drawn:false) when today has zero historical samples (e.g. a weekend) rather than showing a meaningless average. Pass draw=false to just fetch the stats.', {
+  server.tool('jetson_annotate_seasonality', 'Draws today\'s (UTC) day-of-week seasonal read (avg return, avg range, sample size) as a text flag on the live chart — defaulting to whatever symbol is on the chart. Computed from real candles_1h history, not a native Jetson feed. Weaves in the confluence system\'s own weekly_profile layer call and its current trust weighting (damped_weight/weight, staleness): agreement between the two shows as [AGREE], a directional conflict shows as [DIFFER] with an amber flag color instead of the usual green/red. Refuses to draw (drawn:false) when today has zero historical samples (e.g. a weekend) rather than showing a meaningless average. Pass draw=false to just fetch the stats.', {
     pair: z.string().optional().describe('FX pair, e.g. "EURUSD". Omit to use the symbol currently on the live chart.'),
     draw: z.coerce.boolean().optional().describe('Draw the flag on the chart (default true). Set false to only fetch the data.'),
     lookbackDays: z.coerce.number().optional().describe('Days of candles_1h history to compute over (default 180)'),
