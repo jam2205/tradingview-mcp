@@ -789,3 +789,200 @@ describe('jetson core — annotateConfluenceBadge()', () => {
     assert.equal(result.confluence.available, true);
   });
 });
+
+function makeCotExtremeRow(overrides = {}) {
+  return {
+    currency: 'EUR',
+    valid_from: new Date('2026-09-01T00:00:00Z'),
+    valid_to: new Date('2026-09-08T00:00:00Z'),
+    commercial_net: -50000,
+    open_interest: 700000,
+    cot_index_6mo: 62.5,
+    oi_index_6mo: 40,
+    cot_index_1yr: 71.2,
+    oi_index_1yr: 45,
+    cot_index_4yr: 55,
+    oi_index_4yr: 50,
+    cot_index_8yr: 60,
+    oi_index_8yr: 52,
+    cot_index_12yr: 58,
+    oi_index_12yr: 51,
+    report_date: new Date('2026-09-01T00:00:00Z'),
+    ...overrides,
+  };
+}
+
+function makeCalendarRow(overrides = {}) {
+  return {
+    date: new Date(Date.now() + 24 * 3600 * 1000),
+    title: 'ECB Rate Decision',
+    currency: 'EUR',
+    impact: 'high',
+    actual: '',
+    forecast: '4.00%',
+    previous: '3.75%',
+    source: 'forex_factory',
+    event_hash: 'abc123',
+    ...overrides,
+  };
+}
+
+function makeCarryRow(overrides = {}) {
+  return {
+    pair: 'EURUSD',
+    carry: 0.4,
+    carry_positive: true,
+    carry_zscore_20d: 0.5,
+    carry_zscore_90d: 0.3,
+    carry_momentum_20d: 0.01,
+    carry_momentum_5d: 0.002,
+    date: new Date('2026-09-10T00:00:00Z'),
+    ...overrides,
+  };
+}
+
+function makeRiskRow(overrides = {}) {
+  return {
+    pulled_at: new Date('2026-09-11T02:00:00Z'),
+    pair: 'EURUSD',
+    tf: '1D',
+    conditional_vol: 0.28,
+    long_run_vol: 0.44,
+    persistence: 0.99,
+    vol_percentile: 0.1,
+    covol_pc1: -0.11,
+    covol_pc1_percentile: 0.2,
+    covol_variance_explained: 0.76,
+    illiq_composite: 0.000005,
+    illiq_percentile: 0.9,
+    model_dispersion: 0.005,
+    model_dispersion_percentile: 0.8,
+    cot_report_date: new Date('2026-09-01'),
+    cot_non_commercial_zscore: -1.3,
+    cot_is_extreme: false,
+    cot_extreme_direction: 'NORMAL',
+    ...overrides,
+  };
+}
+
+describe('jetson core — getCurrencyNode()', () => {
+  afterEach(() => { globalThis.fetch = originalFetch; });
+
+  it('returns COT extremes and upcoming events, excluding holidays from the event list', async () => {
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('cot_extremes')) return arrowResponse(await makeTableFromRows([makeCotExtremeRow()]));
+      if (String(url).includes('calendar_events')) {
+        return arrowResponse(await makeTableFromRows([
+          makeCalendarRow({ impact: 'high', title: 'ECB Rate Decision' }),
+          makeCalendarRow({ impact: 'HOLIDAY', title: 'Bank Holiday', date: new Date(Date.now() + 48 * 3600 * 1000) }),
+        ]));
+      }
+      return jsonResponse({}, false, 404);
+    };
+    const result = await jetson.getCurrencyNode({ currency: 'eur' });
+    assert.equal(result.currency, 'EUR');
+    assert.equal(result.cot.available, true);
+    assert.equal(result.cot.cot_index_1yr, 71.2);
+    assert.equal(result.upcoming_events.length, 1);
+    assert.equal(result.upcoming_events[0].impact, 'high');
+    assert.equal(result.next_high_impact_event.title, 'ECB Rate Decision');
+    assert.equal(result.upcoming_holidays.length, 1);
+  });
+
+  it('reports cot.available:false for USD without throwing (USD has no COT contract of its own)', async () => {
+    const { tableFromArrays: tfa } = await import('apache-arrow');
+    const emptyCotExtremes = tfa({
+      currency: [], valid_from: [], valid_to: [], commercial_net: [], open_interest: [],
+      cot_index_6mo: [], oi_index_6mo: [], cot_index_1yr: [], oi_index_1yr: [], cot_index_4yr: [], oi_index_4yr: [],
+      cot_index_8yr: [], oi_index_8yr: [], cot_index_12yr: [], oi_index_12yr: [], report_date: [],
+    });
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('cot_extremes')) return arrowResponse(emptyCotExtremes);
+      if (String(url).includes('calendar_events')) return arrowResponse(await makeTableFromRows([makeCalendarRow({ currency: 'USD' })]));
+      return jsonResponse({}, false, 404);
+    };
+    const result = await jetson.getCurrencyNode({ currency: 'USD' });
+    assert.equal(result.cot.available, false);
+    assert.match(result.cot.reason, /USD/);
+  });
+});
+
+describe('jetson core — getCurrencyPairEdge()', () => {
+  afterEach(() => { globalThis.fetch = originalFetch; });
+
+  it('combines carry, risk (best-fit timeframe), and COT sentiment for a pair', async () => {
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('carry_features')) return arrowResponse(await makeTableFromRows([makeCarryRow()]));
+      if (String(url).includes('fx_risk_snapshot')) {
+        return arrowResponse(await makeTableFromRows([
+          makeRiskRow({ tf: '15M', covol_pc1: null, covol_variance_explained: null }),
+          makeRiskRow({ tf: '1D', covol_pc1: -0.11, covol_variance_explained: 0.76 }),
+          makeRiskRow({ tf: '1H', covol_pc1: 0.02, covol_variance_explained: 0.55 }),
+        ]));
+      }
+      if (String(url).includes('cot_pair_sentiment')) return arrowResponse(await makeTableFromRows([makeCotRow()]));
+      return jsonResponse({}, false, 404);
+    };
+    const result = await jetson.getCurrencyPairEdge({ pair: 'EURUSD' });
+    assert.equal(result.carry.available, true);
+    assert.equal(result.carry.carry, 0.4);
+    assert.equal(result.risk.available, true);
+    assert.equal(result.risk.by_timeframe.length, 3);
+    assert.equal(result.risk.primary_covol.tf, '1D'); // best covol_variance_explained, not just first row
+    assert.equal(result.cot.available, true);
+  });
+
+  it('reports carry.available:false without throwing when carry data is missing', async () => {
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('carry_features')) return jsonResponse({}, false, 404);
+      if (String(url).includes('fx_risk_snapshot')) return arrowResponse(await makeTableFromRows([makeRiskRow()]));
+      if (String(url).includes('cot_pair_sentiment')) return arrowResponse(await makeTableFromRows([makeCotRow()]));
+      return jsonResponse({}, false, 404);
+    };
+    const result = await jetson.getCurrencyPairEdge({ pair: 'EURUSD' });
+    assert.equal(result.carry.available, false);
+    assert.equal(result.risk.available, true);
+  });
+});
+
+describe('jetson core — getCurrencyGraph()', () => {
+  afterEach(() => { globalThis.fetch = originalFetch; });
+
+  it('builds nodes for the default G4 currencies and edges for live pairs among them', async () => {
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('cot_extremes')) return arrowResponse(await makeTableFromRows([makeCotExtremeRow()]));
+      if (u.includes('calendar_events')) return arrowResponse(await makeTableFromRows([makeCalendarRow()]));
+      if (u.includes('carry_features')) return arrowResponse(await makeTableFromRows([makeCarryRow()]));
+      if (u.includes('fx_risk_snapshot')) return arrowResponse(await makeTableFromRows([makeRiskRow()]));
+      if (u.includes('cot_pair_sentiment')) return arrowResponse(await makeTableFromRows([makeCotRow()]));
+      if (u.includes('live_bars/pairs')) return jsonResponse({ pairs: ['EURUSD', 'GBPUSD', 'EURGBP', 'USDJPY', 'AUDNZD'], timeframes: ['15M'], file_age_seconds: {} });
+      return jsonResponse({}, false, 404);
+    };
+    const result = await jetson.getCurrencyGraph({});
+    assert.deepEqual(result.currencies, ['USD', 'EUR', 'GBP', 'JPY']);
+    assert.equal(result.nodes.length, 4);
+    // AUDNZD should be excluded — neither AUD nor NZD is in the default currency set
+    const edgePairs = result.edges.map((e) => e.pair);
+    assert.ok(edgePairs.includes('EURUSD'));
+    assert.ok(edgePairs.includes('EURGBP'));
+    assert.ok(!edgePairs.includes('AUDNZD'));
+    assert.match(result.note, /FX-only/);
+  });
+
+  it('respects an explicit currencies list and explicit pairs override', async () => {
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('cot_extremes')) return arrowResponse(await makeTableFromRows([makeCotExtremeRow()]));
+      if (u.includes('calendar_events')) return arrowResponse(await makeTableFromRows([makeCalendarRow()]));
+      if (u.includes('carry_features')) return arrowResponse(await makeTableFromRows([makeCarryRow()]));
+      if (u.includes('fx_risk_snapshot')) return arrowResponse(await makeTableFromRows([makeRiskRow()]));
+      if (u.includes('cot_pair_sentiment')) return arrowResponse(await makeTableFromRows([makeCotRow()]));
+      return jsonResponse({}, false, 404);
+    };
+    const result = await jetson.getCurrencyGraph({ currencies: ['AUD', 'NZD'], pairs: ['AUDNZD'] });
+    assert.deepEqual(result.currencies, ['AUD', 'NZD']);
+    assert.equal(result.edges.length, 1);
+    assert.equal(result.edges[0].pair, 'AUDNZD');
+  });
+});

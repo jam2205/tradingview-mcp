@@ -137,4 +137,26 @@ export function registerJetsonTools(server) {
     try { return jsonResult(await core.annotateConfluenceBadge({ pair, draw })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
+
+  server.tool('jetson_get_currency_node', 'Get a currency\'s macro profile: CFTC COT positioning extremeness (multiple lookback horizons) and upcoming economic-calendar catalysts. FX-only (no equities/metals data exists in this feed). USD legitimately has no COT data of its own — it is the CFTC\'s implicit reference currency, not an individually tracked contract — so cot.available:false for USD is expected, not a bug.', {
+    currency: z.string().describe('Currency code, e.g. "EUR", "USD", "JPY"'),
+  }, async ({ currency }) => {
+    try { return jsonResult(await core.getCurrencyNode({ currency })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('jetson_get_pair_edge', 'Get a currency pair\'s real "edge" data connecting its two currencies: carry/rate-differential proxy, COT institutional bias, and covol_pc1 (a PCA shared-risk factor across the FX pair panel — the real signal for how coupled this pair is to broad FX risk sentiment right now). Coverage varies by timeframe; primary_covol picks the best-fit timeframe, not a hardcoded one.', {
+    pair: z.string().describe('FX pair, e.g. "EURUSD"'),
+  }, async ({ pair }) => {
+    try { return jsonResult(await core.getCurrencyPairEdge({ pair })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('jetson_get_currency_graph', 'Get the FX currency-node graph: one node per currency (COT positioning + calendar catalysts) and one edge per pair between them (carry, COT bias, shared-risk coupling) — use this to reason about how currencies interlink, not just one pair in isolation. Defaults to USD/EUR/GBP/JPY to keep one call fast; pass currencies for a wider set. FX-only by design — this feed has no equities/index/metals data, so no such nodes exist to build.', {
+    currencies: z.array(z.string()).optional().describe('Currencies to include, e.g. ["USD","EUR","GBP","JPY","AUD"]. Defaults to ["USD","EUR","GBP","JPY"].'),
+    pairs: z.array(z.string()).optional().describe('Explicit pairs to build edges for. Omit to auto-derive every live pair between the given currencies.'),
+  }, async ({ currencies, pairs }) => {
+    try { return jsonResult(await core.getCurrencyGraph({ currencies, pairs })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
 }

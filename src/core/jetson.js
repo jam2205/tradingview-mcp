@@ -873,3 +873,165 @@ export async function annotateConfluenceBadge({ pair: pairArg, draw = true, _dep
     return { success: true, pair, chart_symbol: chartSymbol, drawn: false, error: err.message, confluence };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Currency node graph — FX-only by design. This desktop's Jetson feed is
+// entirely FX/rates data; there is no equities, index, or metals feed behind
+// it. A "node" here is a currency with real per-currency data (COT
+// positioning, calendar catalysts); an "edge" is a pair with real pairwise
+// data (carry/rate differential, COT institutional bias, PCA shared-risk
+// coupling). Nothing here is a fabricated correlation matrix — every field
+// traces to an actual Jetson dataset, and anything not covered is reported
+// as unavailable rather than invented.
+// ---------------------------------------------------------------------------
+
+const DEFAULT_GRAPH_CURRENCIES = ['USD', 'EUR', 'GBP', 'JPY'];
+
+/**
+ * Per-currency profile: CFTC COT positioning extremeness (multiple lookback
+ * horizons) and upcoming calendar catalysts. USD legitimately has no COT
+ * futures contract of its own (it's the CFTC's implicit reference currency —
+ * EUR/GBP/JPY/CHF/CAD/AUD/NZD are the tracked contracts, not USD), so
+ * cot.available is correctly false for USD — verified live, not assumed.
+ */
+export async function getCurrencyNode({ currency } = {}) {
+  if (!currency) throw new Error('currency is required (e.g. "EUR")');
+  const ccy = currency.toUpperCase();
+
+  const [cotRows, calRows] = await Promise.all([
+    jetsonFetchArrowRows(`/v1/arrow/cot_extremes?pair=${encodeURIComponent(ccy)}&limit=5`).catch(() => []),
+    jetsonFetchArrowRows(`/v1/arrow/calendar_events?pair=${encodeURIComponent(ccy)}&limit=200`).catch(() => []),
+  ]);
+
+  let cot = {
+    available: false,
+    reason: `No CFTC COT futures contract for "${ccy}" — expected for USD, which is the implicit COT reference currency and has no contract of its own; unexpected for anything else.`,
+  };
+  if (cotRows.length) {
+    const latest = cotRows.reduce((a, b) => (b.report_date > a.report_date ? b : a), cotRows[0]);
+    cot = {
+      available: true,
+      report_date: toIso(latest.report_date),
+      commercial_net: latest.commercial_net,
+      open_interest: latest.open_interest,
+      cot_index_6mo: round(latest.cot_index_6mo, 1),
+      cot_index_1yr: round(latest.cot_index_1yr, 1),
+      cot_index_4yr: round(latest.cot_index_4yr, 1),
+      cot_index_8yr: round(latest.cot_index_8yr, 1),
+      cot_index_12yr: round(latest.cot_index_12yr, 1),
+    };
+  }
+
+  const now = Date.now();
+  const upcoming = calRows.filter((r) => r.impact !== 'HOLIDAY' && r.date >= now).sort((a, b) => a.date - b.date);
+  const upcomingHolidays = calRows.filter((r) => r.impact === 'HOLIDAY' && r.date >= now).sort((a, b) => a.date - b.date);
+  const nextHighImpact = upcoming.find((r) => r.impact === 'high');
+
+  return {
+    success: true,
+    currency: ccy,
+    cot,
+    upcoming_events: upcoming.slice(0, 5).map((r) => ({ date: toIso(r.date), title: r.title, impact: r.impact, forecast: r.forecast, previous: r.previous })),
+    next_high_impact_event: nextHighImpact ? { date: toIso(nextHighImpact.date), title: nextHighImpact.title } : null,
+    upcoming_holidays: upcomingHolidays.slice(0, 3).map((r) => ({ date: toIso(r.date), title: r.title })),
+  };
+}
+
+/**
+ * Per-pair "edge": real rate-differential proxy (carry), real institutional
+ * positioning bias (COT), and real shared-risk coupling (covol_pc1 — a PCA
+ * factor fit across the whole FX pair panel, the closest genuine signal to
+ * "how coupled is this pair to broad FX risk sentiment right now"). Coverage
+ * of covol/illiquidity/model_dispersion genuinely varies by timeframe within
+ * one pull (verified live) — primary_covol picks the timeframe with the best
+ * PCA fit rather than a hardcoded "preferred" timeframe.
+ */
+export async function getCurrencyPairEdge({ pair } = {}) {
+  if (!pair) throw new Error('pair is required (e.g. "EURUSD")');
+
+  const [carryRows, riskRows, sentiment] = await Promise.all([
+    jetsonFetchArrowRows(`/v1/arrow/carry_features?pair=${encodeURIComponent(pair)}&limit=5`).catch(() => []),
+    jetsonFetchArrowRows(`/v1/arrow/fx_risk_snapshot?pair=${encodeURIComponent(pair)}&limit=20`).catch(() => []),
+    getCotSentiment({ pair }).catch((err) => ({ available: false, reason: err.message })),
+  ]);
+
+  let carry = { available: false, reason: `No carry/forward-points data for "${pair}".` };
+  if (carryRows.length) {
+    const latest = carryRows.reduce((a, b) => (b.date > a.date ? b : a), carryRows[0]);
+    carry = {
+      available: true,
+      date: toIso(latest.date),
+      carry: round(latest.carry, 4),
+      carry_positive: latest.carry_positive,
+      carry_zscore_20d: round(latest.carry_zscore_20d, 3),
+      carry_zscore_90d: round(latest.carry_zscore_90d, 3),
+      carry_momentum_5d: round(latest.carry_momentum_5d, 4),
+      carry_momentum_20d: round(latest.carry_momentum_20d, 4),
+    };
+  }
+
+  let risk = { available: false, reason: `No risk snapshot for "${pair}".` };
+  if (riskRows.length) {
+    const latestPull = riskRows.reduce((max, r) => (r.pulled_at > max ? r.pulled_at : max), riskRows[0].pulled_at);
+    const byTf = riskRows
+      .filter((r) => r.pulled_at === latestPull)
+      .map((r) => ({
+        tf: r.tf,
+        conditional_vol: round(r.conditional_vol, 4),
+        vol_percentile: round(r.vol_percentile, 3),
+        covol_pc1: round(r.covol_pc1, 4),
+        covol_pc1_percentile: round(r.covol_pc1_percentile, 3),
+        covol_variance_explained: round(r.covol_variance_explained, 3),
+        illiq_percentile: round(r.illiq_percentile, 3),
+      }));
+    const primaryCovol = byTf
+      .filter((r) => r.covol_pc1 != null)
+      .sort((a, b) => (b.covol_variance_explained ?? 0) - (a.covol_variance_explained ?? 0))[0] || null;
+    risk = {
+      available: true,
+      pulled_at: toIso(latestPull),
+      by_timeframe: byTf,
+      primary_covol: primaryCovol,
+      note: 'covol_pc1 is a PCA shared-risk factor across the FX pair panel — real cross-pair coupling, not a fabricated correlation. Coverage varies by timeframe; primary_covol picks the best-fit timeframe (highest covol_variance_explained), not a hardcoded one.',
+    };
+  }
+
+  return { success: true, pair, carry, risk, cot: sentiment };
+}
+
+/**
+ * The actual graph: one node per currency, one edge per pair between two of
+ * those currencies that the Jetson feed is currently streaming live.
+ * Deliberately FX-only — this desktop's Jetson has no equities/index/metals
+ * feed, so there is nothing real to build other asset-class nodes from.
+ * Defaults to a small G4 set to keep one call fast; pass currencies for a
+ * wider set (edges scale combinatorially, so a sane cap applies).
+ */
+export async function getCurrencyGraph({ currencies, pairs } = {}) {
+  const ccys = (currencies && currencies.length ? currencies : DEFAULT_GRAPH_CURRENCIES).map((c) => c.toUpperCase());
+
+  const nodes = await Promise.all(
+    ccys.map((ccy) => getCurrencyNode({ currency: ccy }).catch((err) => ({ success: false, currency: ccy, error: err.message })))
+  );
+
+  let edgePairs = pairs;
+  if (!edgePairs || !edgePairs.length) {
+    const live = await getLivePairs();
+    edgePairs = (live.pairs || []).filter((p) => p.length === 6 && ccys.includes(p.slice(0, 3)) && ccys.includes(p.slice(3)));
+  }
+  edgePairs = edgePairs.slice(0, 30);
+
+  const edges = [];
+  for (const pair of edgePairs) {
+    try { edges.push(await getCurrencyPairEdge({ pair })); }
+    catch (err) { edges.push({ success: false, pair, error: err.message }); }
+  }
+
+  return {
+    success: true,
+    currencies: ccys,
+    nodes,
+    edges,
+    note: 'FX-only graph — this Jetson feed has no equities/commodities/index data, so no such nodes exist here. Every edge field traces to a real dataset (carry_features, cot_pair_sentiment, fx_risk_snapshot); nothing is a fabricated correlation.',
+  };
+}
