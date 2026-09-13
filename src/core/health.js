@@ -349,12 +349,30 @@ export async function launch({ port, kill_existing, _deps } = {}) {
     throw new Error(`TradingView not found on ${platform}. Searched: ${candidates.join(', ')}. Launch manually with: /path/to/TradingView --remote-debugging-port=${cdpPort}`);
   }
 
+  // On Linux/macOS match the process name exactly (case-insensitive) instead of `pkill -f TradingView`:
+  // the Linux snap/deb binary is lowercase `tradingview`, so -f missed the main process while killing its
+  // renderers (and any shell or browser whose command line contained "TradingView").
   const killExisting = async () => {
+    if (platform === 'win32') {
+      try {
+        deps.execSync('taskkill /F /IM TradingView.exe', { timeout: 5000 });
+        await deps.delay(1500);
+      } catch { /* may not be running */ }
+      return;
+    }
+    // SIGTERM only the main process (oldest match) so it quits gracefully and takes its children with it.
+    // On Linux the zygotes/renderers are also named `tradingview`; signalling them at the same time makes
+    // the main process abort ("GPU process isn't usable. Goodbye.") before it saves state.
     try {
-      if (platform === 'win32') deps.execSync('taskkill /F /IM TradingView.exe', { timeout: 5000 });
-      else deps.execSync('pkill -f TradingView', { timeout: 5000 });
-      await deps.delay(1500);
-    } catch { /* may not be running */ }
+      deps.execSync('pkill -o -i -x tradingview', { timeout: 5000 });
+    } catch { return; /* not running */ }
+    for (let i = 0; i < 5; i++) {
+      await deps.delay(1000);
+      try { deps.execSync('pgrep -i -x tradingview', { timeout: 5000 }); } catch { return; /* exited */ }
+    }
+    // A wedged main thread never handles SIGTERM and would keep holding the CDP port.
+    try { deps.execSync('pkill -KILL -i -x tradingview', { timeout: 5000 }); } catch { /* exited meanwhile */ }
+    await deps.delay(1000);
   };
 
   if (killFirst) await killExisting();
