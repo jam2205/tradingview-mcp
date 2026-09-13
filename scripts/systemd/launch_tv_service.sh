@@ -29,7 +29,9 @@ LOCATIONS=(
   "$HOME/.local/share/TradingView/TradingView"
   "/usr/bin/tradingview"
   "/usr/local/bin/tradingview"
-  "/snap/tradingview/current/tradingview"
+  # Snap wrapper, not /snap/tradingview/current/tradingview: the inner binary skips the
+  # wrapper's --no-sandbox and aborts with "No usable sandbox!" (confirmed 2026-09-13).
+  "/snap/bin/tradingview"
   "/var/lib/flatpak/app/com.tradingview.TradingView/current/active/files/bin/tradingview"
   "$HOME/.local/share/flatpak/app/com.tradingview.TradingView/current/active/files/bin/tradingview"
 )

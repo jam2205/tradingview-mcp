@@ -14,11 +14,12 @@ const CDP_VERSION = JSON.stringify({ Browser: 'Chrome/140', 'User-Agent': 'TVDes
 
 // ── Mock helpers ─────────────────────────────────────────────────────────
 
-function mockChild({ failWith } = {}) {
+function mockChild({ failWith, exitWith } = {}) {
   const child = new EventEmitter();
   child.pid = 12345;
   child.unref = () => {};
   if (failWith) queueMicrotask(() => child.emit('error', Object.assign(new Error(failWith), { code: failWith })));
+  if (exitWith) queueMicrotask(() => child.emit('exit', exitWith.code ?? null, exitWith.signal ?? null));
   return child;
 }
 
@@ -150,10 +151,12 @@ describe('launch() — classic install path', { skip: !onWindows }, () => {
 });
 
 describe('launch() — killing existing instances (Linux/macOS)', { skip: onWindows }, () => {
-  const TV_PATHS = ['/snap/tradingview/current/tradingview', '/Applications/TradingView.app/Contents/MacOS/TradingView'];
+  // The inner snap binary is present too, so the Linux tests prove it is never picked.
+  const TV_PATHS = ['/snap/bin/tradingview', '/snap/tradingview/current/tradingview', '/Applications/TradingView.app/Contents/MacOS/TradingView'];
+  const onLinux = process.platform === 'linux';
 
-  function posixDeps({ exitsOnTerm }) {
-    const state = { cmds: [], alive: true, spawned: [] };
+  function posixDeps({ exitsOnTerm = true, exitWith } = {}) {
+    const state = { cmds: [], alive: true, spawned: [], probes: 0 };
     const deps = {
       existsSync: (p) => TV_PATHS.includes(p),
       execSync: (cmd) => {
@@ -163,13 +166,37 @@ describe('launch() — killing existing instances (Linux/macOS)', { skip: onWind
         if (cmd === 'pkill -KILL -i -x tradingview') { state.alive = false; return ''; }
         throw new Error(`unexpected execSync: ${cmd}`);
       },
-      spawn: (exe) => { state.spawned.push(exe); return mockChild(); },
+      spawn: (exe) => { state.spawned.push(exe); return mockChild({ exitWith }); },
       cpSync: () => {}, rmSync: () => {}, readdirSync: () => [],
       delay: async () => {},
-      probeCdp: async () => CDP_VERSION,
+      probeCdp: async () => { state.probes++; return CDP_VERSION; },
     };
     return { deps, state };
   }
+
+  it('launches the snap through /snap/bin/tradingview, never the inner binary', { skip: !onLinux }, async () => {
+    const { deps, state } = posixDeps();
+    const result = await launch({ _deps: deps });
+    assert.equal(result.success, true);
+    assert.equal(result.binary, '/snap/bin/tradingview');
+    assert.deepEqual(state.spawned, ['/snap/bin/tradingview']);
+  });
+
+  it('reports failure when TradingView dies on startup instead of claiming success', { skip: !onLinux }, async () => {
+    const { deps, state } = posixDeps({ exitWith: { signal: 'SIGTRAP' } });
+    const result = await launch({ _deps: deps });
+    assert.equal(result.success, false);
+    assert.match(result.error, /exited immediately/);
+    assert.equal(state.probes, 0);
+  });
+
+  it('keeps probing CDP when the launcher exits 0 (hand-off to a running instance)', { skip: !onLinux }, async () => {
+    const { deps, state } = posixDeps({ exitWith: { code: 0 } });
+    const result = await launch({ kill_existing: false, _deps: deps });
+    assert.equal(result.success, true);
+    assert.ok(result.browser);
+    assert.ok(state.probes >= 1);
+  });
 
   it('SIGTERMs only the main (oldest) process by exact name instead of pkill -f', async () => {
     const { deps, state } = posixDeps({ exitsOnTerm: true });

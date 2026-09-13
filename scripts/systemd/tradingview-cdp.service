@@ -8,7 +8,8 @@ Type=simple
 ExecStart=%h/tradingview-mcp/scripts/systemd/launch_tv_service.sh
 Restart=on-failure
 RestartSec=5
-Environment=TV_CDP_PORT=9222
+# 9223: port 9222 is used by the Chrome/TradingView-web CDP session on this machine
+Environment=TV_CDP_PORT=9223
 Environment=TV_LAUNCH_WATCHDOG_S=20
 
 [Install]

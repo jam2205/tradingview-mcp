@@ -11,7 +11,7 @@ Restart=on-failure
 RestartSec=5
 Environment=TV_MCP_HTTP_HOST=127.0.0.1
 Environment=TV_MCP_HTTP_PORT=8787
-Environment=TV_CDP_PORT=9222
+Environment=TV_CDP_PORT=9223
 Environment=JETSON_BASE_URL=http://10.10.10.1:8769
 
 [Install]

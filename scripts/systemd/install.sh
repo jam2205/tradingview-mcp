@@ -8,11 +8,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 UNIT_DIR="$HOME/.config/systemd/user"
 
 mkdir -p "$UNIT_DIR"
-cp "$SCRIPT_DIR/tradingview-cdp.service" "$UNIT_DIR/"
-cp "$SCRIPT_DIR/tradingview-mcp-http.service" "$UNIT_DIR/"
+# Unit files assume the repo lives at ~/tradingview-mcp; point them at wherever it actually is.
+for unit in tradingview-cdp.service tradingview-mcp-http.service; do
+  sed "s|%h/tradingview-mcp|$REPO_DIR|g" "$SCRIPT_DIR/$unit" > "$UNIT_DIR/$unit"
+done
 chmod +x "$SCRIPT_DIR/launch_tv_service.sh" "$SCRIPT_DIR/run_mcp_http.sh"
 
 systemctl --user daemon-reload

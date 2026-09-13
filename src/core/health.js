@@ -304,7 +304,9 @@ export async function launch({ port, kill_existing, _deps } = {}) {
       '/opt/TradingView/TradingView',
       `${process.env.HOME}/.local/share/TradingView/TradingView`,
       '/usr/bin/tradingview',
-      '/snap/tradingview/current/tradingview',
+      // Snap wrapper, not /snap/tradingview/current/tradingview: the inner binary skips the
+      // wrapper's --no-sandbox and aborts with "No usable sandbox!" on Ubuntu 23.10+.
+      '/snap/bin/tradingview',
     ],
   };
 
@@ -381,6 +383,18 @@ export async function launch({ port, kill_existing, _deps } = {}) {
   let child = _spawnDetached(deps.spawn, tvPath, cdpArgs);
   let info = null;
   let usedLocalCopy = false;
+
+  if (platform !== 'win32') {
+    // Catch a launch that dies on startup (e.g. a sandbox abort) instead of probing CDP for 15s and
+    // reporting success. Exit code 0 is a single-instance hand-off to an already-running TradingView.
+    const earlyFailure = await _spawnFailedEarly(child);
+    if (earlyFailure && earlyFailure !== 'exited immediately (code 0)') {
+      return {
+        success: false, platform, binary: tvPath, cdp_port: cdpPort,
+        error: `TradingView ${earlyFailure}. Run it manually to see why: ${tvPath} --remote-debugging-port=${cdpPort}`,
+      };
+    }
+  }
 
   if (platform === 'win32' && WINDOWS_APPS_RE.test(tvPath)) {
     const earlyFailure = await _spawnFailedEarly(child);
