@@ -360,8 +360,11 @@ export async function launch({ port, kill_existing, _deps } = {}) {
       } catch { /* may not be running */ }
       return;
     }
+    // SIGTERM only the main process (oldest match) so it quits gracefully and takes its children with it.
+    // On Linux the zygotes/renderers are also named `tradingview`; signalling them at the same time makes
+    // the main process abort ("GPU process isn't usable. Goodbye.") before it saves state.
     try {
-      deps.execSync('pkill -i -x tradingview', { timeout: 5000 });
+      deps.execSync('pkill -o -i -x tradingview', { timeout: 5000 });
     } catch { return; /* not running */ }
     for (let i = 0; i < 5; i++) {
       await deps.delay(1000);

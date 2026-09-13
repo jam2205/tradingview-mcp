@@ -158,7 +158,7 @@ describe('launch() — killing existing instances (Linux/macOS)', { skip: onWind
       existsSync: (p) => TV_PATHS.includes(p),
       execSync: (cmd) => {
         state.cmds.push(cmd);
-        if (cmd === 'pkill -i -x tradingview') { if (exitsOnTerm) state.alive = false; return ''; }
+        if (cmd === 'pkill -o -i -x tradingview') { if (exitsOnTerm) state.alive = false; return ''; }
         if (cmd === 'pgrep -i -x tradingview') { if (!state.alive) throw new Error('exit 1'); return '123\n'; }
         if (cmd === 'pkill -KILL -i -x tradingview') { state.alive = false; return ''; }
         throw new Error(`unexpected execSync: ${cmd}`);
@@ -171,11 +171,11 @@ describe('launch() — killing existing instances (Linux/macOS)', { skip: onWind
     return { deps, state };
   }
 
-  it('matches the process name exactly instead of pkill -f', async () => {
+  it('SIGTERMs only the main (oldest) process by exact name instead of pkill -f', async () => {
     const { deps, state } = posixDeps({ exitsOnTerm: true });
     const result = await launch({ _deps: deps });
     assert.equal(result.success, true);
-    assert.equal(state.cmds[0], 'pkill -i -x tradingview');
+    assert.equal(state.cmds[0], 'pkill -o -i -x tradingview');
     assert.ok(state.cmds.every((c) => !c.includes(' -f ')));
     assert.ok(!state.cmds.includes('pkill -KILL -i -x tradingview'));
     assert.equal(state.spawned.length, 1);
