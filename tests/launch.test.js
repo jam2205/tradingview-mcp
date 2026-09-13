@@ -148,3 +148,51 @@ describe('launch() — classic install path', { skip: !onWindows }, () => {
     await assert.rejects(() => launch({ _deps: deps }), /TradingView not found/);
   });
 });
+
+describe('launch() — killing existing instances (Linux/macOS)', { skip: onWindows }, () => {
+  const TV_PATHS = ['/snap/tradingview/current/tradingview', '/Applications/TradingView.app/Contents/MacOS/TradingView'];
+
+  function posixDeps({ exitsOnTerm }) {
+    const state = { cmds: [], alive: true, spawned: [] };
+    const deps = {
+      existsSync: (p) => TV_PATHS.includes(p),
+      execSync: (cmd) => {
+        state.cmds.push(cmd);
+        if (cmd === 'pkill -i -x tradingview') { if (exitsOnTerm) state.alive = false; return ''; }
+        if (cmd === 'pgrep -i -x tradingview') { if (!state.alive) throw new Error('exit 1'); return '123\n'; }
+        if (cmd === 'pkill -KILL -i -x tradingview') { state.alive = false; return ''; }
+        throw new Error(`unexpected execSync: ${cmd}`);
+      },
+      spawn: (exe) => { state.spawned.push(exe); return mockChild(); },
+      cpSync: () => {}, rmSync: () => {}, readdirSync: () => [],
+      delay: async () => {},
+      probeCdp: async () => CDP_VERSION,
+    };
+    return { deps, state };
+  }
+
+  it('matches the process name exactly instead of pkill -f', async () => {
+    const { deps, state } = posixDeps({ exitsOnTerm: true });
+    const result = await launch({ _deps: deps });
+    assert.equal(result.success, true);
+    assert.equal(state.cmds[0], 'pkill -i -x tradingview');
+    assert.ok(state.cmds.every((c) => !c.includes(' -f ')));
+    assert.ok(!state.cmds.includes('pkill -KILL -i -x tradingview'));
+    assert.equal(state.spawned.length, 1);
+  });
+
+  it('escalates to SIGKILL when the main process ignores SIGTERM', async () => {
+    const { deps, state } = posixDeps({ exitsOnTerm: false });
+    const result = await launch({ _deps: deps });
+    assert.equal(result.success, true);
+    assert.equal(state.cmds.filter((c) => c === 'pgrep -i -x tradingview').length, 5);
+    assert.equal(state.cmds.at(-1), 'pkill -KILL -i -x tradingview');
+    assert.equal(state.spawned.length, 1);
+  });
+
+  it('skips the kill entirely when kill_existing is false', async () => {
+    const { deps, state } = posixDeps({ exitsOnTerm: true });
+    await launch({ kill_existing: false, _deps: deps });
+    assert.deepEqual(state.cmds, []);
+  });
+});
