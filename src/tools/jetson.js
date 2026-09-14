@@ -32,7 +32,7 @@ export function registerJetsonTools(server) {
 
   server.tool('jetson_get_dataset', 'Fetch rows from any cataloged Jetson dataset by its URL (from jetson_get_dataset_catalog, e.g. "/v1/arrow/candles_1h").', {
     dataset_url: z.string().describe('Dataset URL from the catalog, e.g. "/v1/arrow/candles_1h"'),
-    params: z.record(z.union([z.string(), z.number()])).optional().describe('Query params the dataset accepts (e.g. { pair: "EURUSD", limit: 200 })'),
+    params: z.record(z.string(), z.union([z.string(), z.number()])).optional().describe('Query params the dataset accepts (e.g. { pair: "EURUSD", limit: 200 })'),
   }, async ({ dataset_url, params }) => {
     try { return jsonResult(await core.getDataset({ dataset_url, params })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
