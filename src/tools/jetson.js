@@ -20,7 +20,7 @@ export function registerJetsonTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('jetson_get_live_bars', 'Get live OHLCV bars for one FX pair from the Jetson. Use summary=true for a compact regime/indicator readout instead of raw bars (saves context). NOTE: the live ring buffer holds a fixed wall-clock window per timeframe, not a fixed bar count — verified ~9 bars for 1H, ~32 for 15M, ~93 for 5M. On 1H, sma20/ema20/zscore20/rsi14 will usually come back null (not enough bars exist) — this is a real data-depth limit, not a bug; prefer 15M or 1M for indicators that need a full window.', {
+  server.tool('jetson_get_live_bars', 'Get live OHLCV bars for one FX pair from the Jetson. Use summary=true for a compact regime/indicator readout instead of raw bars (saves context). NOTE: the live ring buffer holds a fixed wall-clock window per timeframe, not a fixed bar count — verified ~9 bars for 1H, ~32 for 15M, ~93 for 5M. On 1H, sma20/ema20/zscore20/rsi14 will usually come back null (not enough bars exist) — this is a real data-depth limit, not a bug; prefer 15M or 1M for indicators that need a full window. Each bar has source = ig (real IG ticks, the 7 USD majors) or synthetic_cross (derived from two majors, not an observed quote).', {
     pair: z.string().describe('FX pair, e.g. "EURUSD"'),
     tf: z.string().optional().describe('Timeframe: "1M", "5M", "15M", or "1H" (default "1M")'),
     limit: z.coerce.number().optional().describe('Number of bars to retrieve (max 500, default 100)'),
@@ -145,7 +145,7 @@ export function registerJetsonTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('jetson_get_pair_edge', 'Get a currency pair\'s real "edge" data connecting its two currencies: carry/rate-differential proxy, COT institutional bias, and covol_pc1 (a PCA shared-risk factor across the FX pair panel — the real signal for how coupled this pair is to broad FX risk sentiment right now). Coverage varies by timeframe; primary_covol picks the best-fit timeframe, not a hardcoded one.', {
+  server.tool('jetson_get_pair_edge', 'Get a currency pair\'s real "edge" data connecting its two currencies: policy-rate carry (not forward points), COT institutional bias, and covol_pc1 (a PCA shared-risk factor across the FX pair panel — the real signal for how coupled this pair is to broad FX risk sentiment right now). Coverage varies by timeframe; primary_covol picks the best-fit timeframe, not a hardcoded one.', {
     pair: z.string().describe('FX pair, e.g. "EURUSD"'),
   }, async ({ pair }) => {
     try { return jsonResult(await core.getCurrencyPairEdge({ pair })); }

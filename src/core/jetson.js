@@ -191,6 +191,13 @@ function summarizeBars(rows) {
     zscore20: round(zscore20, 3),
     rsi14: round(rsi14, 2),
     regime,
+    // Since 2026-09-15 every live bar carries source = ig | synthetic_cross.
+    // Only the 7 USD majors are real IG ticks; crosses are derived from two
+    // majors, so they are not observed quotes.
+    source: last.source ?? null,
+    ...(last.source === 'synthetic_cross'
+      ? { source_note: 'Synthetic cross built from two IG majors (e.g. GBPCAD = GBPUSD x USDCAD), not an observed quote.' }
+      : {}),
   };
 }
 
@@ -981,7 +988,7 @@ export async function getCurrencyPairEdge({ pair } = {}) {
     getCotSentiment({ pair }).catch((err) => ({ available: false, reason: err.message })),
   ]);
 
-  let carry = { available: false, reason: `No carry/forward-points data for "${pair}".` };
+  let carry = { available: false, reason: `No carry data for "${pair}".` };
   if (carryRows.length) {
     const latest = carryRows.reduce((a, b) => (b.date > a.date ? b : a), carryRows[0]);
     carry = {
@@ -993,6 +1000,7 @@ export async function getCurrencyPairEdge({ pair } = {}) {
       carry_zscore_90d: round(latest.carry_zscore_90d, 3),
       carry_momentum_5d: round(latest.carry_momentum_5d, 4),
       carry_momentum_20d: round(latest.carry_momentum_20d, 4),
+      note: 'Policy-rate carry (base rate minus quote rate, from central bank rates), not market forward points. Values before 2026-09-15 were wrong on the Jetson and have been rebuilt. JPY/AUD/CAD/NZD/CHF legs are monthly OECD proxies, so crosses move in monthly steps; null z-scores mean the rates did not move in that window.',
     };
   }
 
