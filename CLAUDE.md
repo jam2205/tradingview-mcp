@@ -1,6 +1,6 @@
 # TradingView MCP — Claude Instructions
 
-105 tools (84 chart/CDP + 21 Jetson pipeline builder bridge) for reading and controlling a live TradingView Desktop chart via CDP (port 9222).
+108 tools (chart/CDP tools plus the Jetson pipeline builder bridge) for reading and controlling a live TradingView Desktop chart via CDP (port 9223 for Desktop; 9222 is the Chrome web profile).
 
 ## Decision Tree — Which Tool When
 
@@ -123,7 +123,26 @@ These tools can return large payloads. Follow these rules to avoid context bloat
 ## Architecture
 
 ```
-Claude Code ←→ MCP Server (stdio) ←→ CDP (localhost:9222) ←→ TradingView Desktop (Electron)
+Claude Code ←→ MCP Server (stdio) ←→ CDP (localhost:9223) ←→ TradingView Desktop (Electron)
 ```
 
 Pine graphics path: `study._graphics._primitivesCollection.dwglines.get('lines').get(false)._primitivesDataById`
+
+## This fork is the chart layer — where everything else lives
+
+This fork is optional: **nothing in the trading research needs a chart open.** Use its tools to
+draw results (levels, regimes, confluence) on TradingView Desktop, or to develop Pine.
+
+Research moved out of the Studio on 2026-09-19, but only partly — route by what you need:
+
+| You want | Go to |
+|---|---|
+| Jetson data, analytics, query and level tools | `~/quant-bridge` — MCP (stdio) + REST on `:3100`. The **only** thing that touches the Jetson. |
+| The current research loop | `~/fx-research` — chainlog, `runs/`, registry. Start at `HANDOVER.md`. |
+| ICM stages 01-05, framework graph, research outputs | The Studio repo’s `CONTEXT.md`, `stages/`, `framework/`, `research/`. |
+| Jetson routing | `reconblue:~/CONTEXT.md` |
+
+On the Studio: quant-bridge ported its **tools** (2026-09-19), so use quant-bridge for those. Its
+**research artifacts were not migrated** — the ICM stages, `framework/_graph.md` and ~154MB of
+`research/output/` parquet live only there and are still the reference for work up to 2026-09-15.
+Its `:3000` server is retired and its MCP entry is gone; the files are not.
