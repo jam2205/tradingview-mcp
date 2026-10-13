@@ -50,12 +50,45 @@ export function requireFinite(value, name) {
   return n;
 }
 
+// Whether a tab is the one in front. TradingView Desktop reports every tab as
+// document.visibilityState "visible", so that cannot be used; what does differ
+// is that only the front tab is given animation frames (measured 2026-10-13:
+// 31 frames in 0.5 s in front, 0 in the background).
+const FRONT_PROBE = `new Promise(function (res) {
+  var done = false;
+  requestAnimationFrame(function () { if (!done) { done = true; res(true); } });
+  setTimeout(function () { if (!done) { done = true; res(false); } }, 250);
+})`;
+
+async function clientIsFront(c) {
+  const { result } = await c.Runtime.evaluate({ expression: FRONT_PROBE, awaitPromise: true, returnByValue: true });
+  return result?.value === true;
+}
+
+/** Whether the CDP page target with this id is the tab in front. */
+export async function isFrontTarget(targetId) {
+  let c = null;
+  try {
+    c = await CDP({ host: CDP_HOST, port: CDP_PORT, target: targetId });
+    return await clientIsFront(c);
+  } catch {
+    return false;
+  } finally {
+    try { if (c) await c.close(); } catch { /* already gone */ }
+  }
+}
+
 export async function getClient() {
   if (client) {
     try {
-      // Quick liveness check
-      await client.Runtime.evaluate({ expression: '1', returnByValue: true });
-      return client;
+      // Liveness check that also says whether this tab is the one in front.
+      if (await clientIsFront(client)) return client;
+      // The attached tab is in the background. Follow the tab in front, so
+      // reads and drawings land on the chart the user is looking at. With no
+      // chart tab in front (window minimised or covered) stay where we are.
+      const front = await findVisibleChartTarget(targetInfo?.id);
+      if (!front) return client;
+      return reconnectTo(front.id);
     } catch {
       client = null;
       targetInfo = null;
@@ -107,11 +140,40 @@ export async function reconnectTo(targetId) {
   return connect(targetId);
 }
 
-async function findChartTarget() {
+async function listChartTargets() {
   const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
   const targets = await resp.json();
-  // Prefer targets with tradingview.com/chart in the URL
-  return targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url))
+  return {
+    targets,
+    charts: targets.filter(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url)),
+  };
+}
+
+// Looking for the front tab opens a short connection to every other chart tab,
+// so when none is in front (window minimised) the answer is kept for a moment.
+let noVisibleUntil = 0;
+
+/** The chart tab in front, or null when none is being drawn. */
+async function findVisibleChartTarget(skipId = null) {
+  if (Date.now() < noVisibleUntil) return null;
+  const { charts } = await listChartTargets();
+  for (const t of charts) {
+    if (t.id === skipId) continue;
+    if (await isFrontTarget(t.id)) return t;
+  }
+  noVisibleUntil = Date.now() + 2000;
+  return null;
+}
+
+async function findChartTarget() {
+  const { targets, charts } = await listChartTargets();
+  // With several chart tabs open, take the one in front; else the first chart
+  // target, else any TradingView page.
+  if (charts.length > 1) {
+    const front = await findVisibleChartTarget();
+    if (front) return front;
+  }
+  return charts[0]
     || targets.find(t => t.type === 'page' && /tradingview/i.test(t.url))
     || null;
 }

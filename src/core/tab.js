@@ -10,7 +10,7 @@
  * (Approach from issue #155 and PR #163, verified on Desktop 3.1.0.)
  */
 import CDP from 'chrome-remote-interface';
-import { getClient, reconnectTo, CDP_HOST, CDP_PORT } from '../connection.js';
+import { getClient, reconnectTo, isFrontTarget, CDP_HOST, CDP_PORT } from '../connection.js';
 
 /**
  * List all open chart tabs (CDP page targets).
@@ -69,19 +69,8 @@ async function withShell(fn) {
   throw new Error('TradingView shell window (tab bar) not found. Is this TradingView Desktop with tabs?');
 }
 
-/** Check whether a CDP page target is the visible one. */
-async function isTargetVisible(targetId) {
-  let c = null;
-  try {
-    c = await CDP({ host: CDP_HOST, port: CDP_PORT, target: targetId });
-    const { result } = await c.Runtime.evaluate({ expression: 'document.visibilityState', returnByValue: true });
-    return result?.value === 'visible';
-  } catch {
-    return false;
-  } finally {
-    try { if (c) await c.close(); } catch { /* already gone */ }
-  }
-}
+/** Check whether a CDP page target is the tab in front. */
+const isTargetVisible = isFrontTarget;
 
 /** Find an open new-tab landing page target (shows the layout picker). */
 async function findLandingTarget() {
