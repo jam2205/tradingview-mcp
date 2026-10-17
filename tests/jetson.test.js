@@ -1272,3 +1272,107 @@ describe('jetson core — annotateSeasonality()', () => {
     assert.equal(result.drawn, true);
   });
 });
+
+// Drives pane.list()/pane.focus()'s real evaluate() JS contract (matched by
+// pattern in the JS source string, the same way the real CDP call would be
+// distinguished) combined with drawShape's before/create/after cycle — so
+// a single _deps.evaluate mock can stand in for a whole multi-pane session.
+function makeMultiPaneDeps({ panes, activeIndex }) {
+  const drawnIds = [];
+  let drawCycle = 0;
+  const evaluate = async (js) => {
+    if (js.includes('panes.push')) {
+      return { layout: '4', chart_count: panes.length, active_index: activeIndex, panes };
+    }
+    const focusMatch = /if \((\d+) >= all\.length\)/.exec(js);
+    if (focusMatch) {
+      const idx = Number(focusMatch[1]);
+      if (idx >= panes.length) return { error: `Pane index ${idx} out of range (have ${panes.length} panes)` };
+      return { focused: idx, total: panes.length };
+    }
+    // Fall through to drawShape's before/create/after cycle.
+    drawCycle += 1;
+    const pos = drawCycle % 3;
+    if (pos === 1) return drawnIds.slice();
+    if (pos === 2) return null;
+    const id = `shape_${drawCycle}`;
+    drawnIds.push(id);
+    return drawnIds.slice();
+  };
+  return { evaluate, getChartApi: async () => 'window.mockApi' };
+}
+
+describe('jetson core — annotateConfluenceBadgesAllPanes()', () => {
+  afterEach(() => { globalThis.fetch = originalFetch; });
+
+  function mockConfluenceFetchFor(pairsToConfluence) {
+    return async (url) => {
+      const u = String(url);
+      for (const [pair, direction] of Object.entries(pairsToConfluence)) {
+        if (u.includes('confluence?pair=' + pair)) return arrowResponse(await makeTableFromRows([makeConfluenceRow({ pair, draw_direction: direction })]));
+      }
+      if (u.includes('live_bars')) return arrowResponse(makeBarsTable({ count: 5 }));
+      return jsonResponse({}, false, 404);
+    };
+  }
+
+  it('draws a badge on every FX pane, skips non-FX panes, and restores the original active pane', async () => {
+    const panes = [
+      { index: 0, symbol: 'OANDA:EURUSD', resolution: '15' },
+      { index: 1, symbol: 'OANDA:GBPUSD', resolution: '15' },
+      { index: 2, symbol: 'BATS:AAPL', resolution: 'D' }, // non-FX — should be skipped
+    ];
+    globalThis.fetch = mockConfluenceFetchFor({ EURUSD: 'UP', GBPUSD: 'DOWN' });
+    const deps = makeMultiPaneDeps({ panes, activeIndex: 1 });
+
+    const result = await jetson.annotateConfluenceBadgesAllPanes({ _deps: deps });
+
+    assert.equal(result.drawn, true);
+    assert.equal(result.panes_annotated, 2);
+    assert.equal(result.panes_skipped, 1);
+    assert.equal(result.restored_active_index, 1);
+
+    const eurusdResult = result.results.find((r) => r.index === 0);
+    assert.equal(eurusdResult.drawn, true);
+    assert.equal(eurusdResult.pair, 'EURUSD');
+
+    const aaplResult = result.results.find((r) => r.index === 2);
+    assert.equal(aaplResult.drawn, false);
+    assert.match(aaplResult.reason, /doesn't look like an FX pair/);
+  });
+
+  it('reports drawn:false with a clear reason on a single-pane layout, without touching the chart', async () => {
+    const panes = [{ index: 0, symbol: 'OANDA:EURUSD', resolution: '15' }];
+    const deps = makeMultiPaneDeps({ panes, activeIndex: 0 });
+    const result = await jetson.annotateConfluenceBadgesAllPanes({ _deps: deps });
+    assert.equal(result.drawn, false);
+    assert.match(result.reason, /Only 1 pane/);
+  });
+
+  it('draw:false fetches confluence for every pane without drawing anything', async () => {
+    const panes = [
+      { index: 0, symbol: 'OANDA:EURUSD', resolution: '15' },
+      { index: 1, symbol: 'OANDA:GBPUSD', resolution: '15' },
+    ];
+    globalThis.fetch = mockConfluenceFetchFor({ EURUSD: 'UP', GBPUSD: 'DOWN' });
+    const deps = makeMultiPaneDeps({ panes, activeIndex: 0 });
+    const result = await jetson.annotateConfluenceBadgesAllPanes({ draw: false, _deps: deps });
+    assert.equal(result.drawn, false);
+    assert.equal(result.results.every((r) => r.confluence?.available), true);
+  });
+
+  it('continues annotating remaining panes when one pane errors out', async () => {
+    const panes = [
+      { index: 0, symbol: 'OANDA:EURUSD', resolution: '15' },
+      { index: 1, error: 'no main series' },
+      { index: 2, symbol: 'OANDA:GBPUSD', resolution: '15' },
+    ];
+    globalThis.fetch = mockConfluenceFetchFor({ EURUSD: 'UP', GBPUSD: 'DOWN' });
+    const deps = makeMultiPaneDeps({ panes, activeIndex: 0 });
+    const result = await jetson.annotateConfluenceBadgesAllPanes({ _deps: deps });
+    assert.equal(result.panes_annotated, 2);
+    const errored = result.results.find((r) => r.index === 1);
+    assert.equal(errored.drawn, false);
+    assert.match(errored.reason, /Could not read this pane's symbol/);
+  });
+});

@@ -138,6 +138,13 @@ export function registerJetsonTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
+  server.tool('jetson_annotate_confluence_badges_all_panes', 'Draws a confluence badge on EVERY pane in the current multi-pane layout, not just the active one — use this for "the other pairs too" when the chart is in a 2x2/grid layout with different symbols per pane. Focuses each pane in turn to draw its own badge, then restores whichever pane was originally active. Panes on a non-FX symbol are skipped and reported, not silently dropped. Requires at least 2 panes (pane_set_layout first) — reports drawn:false with a reason on a single-pane layout.', {
+    draw: z.coerce.boolean().optional().describe('Draw the badges (default true). Set false to just fetch confluence for every pane\'s symbol without drawing.'),
+  }, async ({ draw }) => {
+    try { return jsonResult(await core.annotateConfluenceBadgesAllPanes({ draw })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
   server.tool('jetson_get_currency_node', 'Get a currency\'s macro profile: CFTC COT positioning extremeness (multiple lookback horizons) and upcoming economic-calendar catalysts. FX-only (no equities/metals data exists in this feed). USD legitimately has no COT data of its own — it is the CFTC\'s implicit reference currency, not an individually tracked contract — so cot.available:false for USD is expected, not a bug.', {
     currency: z.string().describe('Currency code, e.g. "EUR", "USD", "JPY"'),
   }, async ({ currency }) => {
