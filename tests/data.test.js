@@ -45,6 +45,20 @@ describe('findSwingPoints()', () => {
     assert.equal(lows[0].price, 1.0);
   });
 
+  it('gives a tied low to its first bar: one swing, not none', async () => {
+    const bars = makeBars({ count: 21, highIndex: null, lowIndex: 10 });
+    bars[11].low = 1.0;
+    const lows = (await findSwingPoints({ window: 5, _deps: depsWithBars(bars) })).swings.filter((s) => s.type === 'swing_low');
+    assert.deepEqual(lows.map((s) => s.bar_index), [10]);
+  });
+
+  it('makes no swing from a flat run of equal bars', async () => {
+    const bars = makeBars({ count: 21, highIndex: null, lowIndex: null });
+    const result = await findSwingPoints({ window: 5, _deps: depsWithBars(bars) });
+    assert.deepEqual(result.swings, []);
+    assert.deepEqual(result.provisional, []);
+  });
+
   it('lists a high among the newest bars as provisional, not as a confirmed swing', async () => {
     const bars = makeBars({ count: 21, highIndex: 18, lowIndex: null });
     const result = await findSwingPoints({ window: 5, _deps: depsWithBars(bars) });

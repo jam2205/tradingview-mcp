@@ -246,8 +246,9 @@ export async function findSwingPoints({ count, window, _deps } = {}) {
     let isLow = true;
     for (let j = i - w; j <= i + w; j++) {
       if (j === i) continue;
-      if (isHigh && bars[j].high >= pivotHigh) isHigh = false;
-      if (isLow && bars[j].low <= pivotLow) isLow = false;
+      // A tie goes to the first bar, so equal highs or lows make one swing, not none.
+      if (isHigh && (j < i ? bars[j].high >= pivotHigh : bars[j].high > pivotHigh)) isHigh = false;
+      if (isLow && (j < i ? bars[j].low <= pivotLow : bars[j].low < pivotLow)) isLow = false;
       if (!isHigh && !isLow) break;
     }
     if (isHigh) swings.push({ type: 'swing_high', bar_index: i, time: bars[i].time, time_utc: timeUtc(bars[i]), price: roundPrice(pivotHigh) });
@@ -259,12 +260,11 @@ export async function findSwingPoints({ count, window, _deps } = {}) {
   const provisional = [];
   const last = bars.length - 1;
   for (let i = Math.max(w, bars.length - w); i <= last; i++) {
-    const others = [];
-    for (let j = i - w; j <= last; j++) if (j !== i) others.push(bars[j]);
+    const before = bars.slice(i - w, i), after = bars.slice(i + 1);
     const base = { bar_index: i, time: bars[i].time, time_utc: timeUtc(bars[i]) };
     const progress = { bars_after: last - i, bars_needed: w };
-    if (others.every((b) => b.high < bars[i].high)) provisional.push({ type: 'swing_high', ...base, price: roundPrice(bars[i].high), ...progress });
-    if (others.every((b) => b.low > bars[i].low)) provisional.push({ type: 'swing_low', ...base, price: roundPrice(bars[i].low), ...progress });
+    if (before.every((b) => b.high < bars[i].high) && after.every((b) => b.high <= bars[i].high)) provisional.push({ type: 'swing_high', ...base, price: roundPrice(bars[i].high), ...progress });
+    if (before.every((b) => b.low > bars[i].low) && after.every((b) => b.low >= bars[i].low)) provisional.push({ type: 'swing_low', ...base, price: roundPrice(bars[i].low), ...progress });
   }
 
   return {
