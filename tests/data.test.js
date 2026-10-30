@@ -40,6 +40,7 @@ describe('findSwingPoints()', () => {
     assert.equal(highs[0].bar_index, 10);
     assert.equal(highs[0].price, 1.2);
     assert.equal(highs[0].time, bars[10].time);
+    assert.equal(highs[0].time_utc, new Date(bars[10].time * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' UTC');
     assert.equal(lows[0].bar_index, 15);
     assert.equal(lows[0].price, 1.0);
   });

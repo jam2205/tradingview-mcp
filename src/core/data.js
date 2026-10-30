@@ -248,8 +248,9 @@ export async function findSwingPoints({ count, window, _deps } = {}) {
       if (isLow && bars[j].low <= pivotLow) isLow = false;
       if (!isHigh && !isLow) break;
     }
-    if (isHigh) swings.push({ type: 'swing_high', bar_index: i, time: bars[i].time, price: roundPrice(pivotHigh) });
-    if (isLow) swings.push({ type: 'swing_low', bar_index: i, time: bars[i].time, price: roundPrice(pivotLow) });
+    const time_utc = new Date(bars[i].time * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+    if (isHigh) swings.push({ type: 'swing_high', bar_index: i, time: bars[i].time, time_utc, price: roundPrice(pivotHigh) });
+    if (isLow) swings.push({ type: 'swing_low', bar_index: i, time: bars[i].time, time_utc, price: roundPrice(pivotLow) });
   }
 
   return {
@@ -258,7 +259,7 @@ export async function findSwingPoints({ count, window, _deps } = {}) {
     bar_count: bars.length,
     swing_count: swings.length,
     swings,
-    note: "time is in this chart's native bar-time units (same as draw_shape's point.time) — use these coordinates directly to anchor your own text annotation at this exact bar; this tool only finds WHERE, write your own narrative for WHAT to say.",
+    note: "Read time_utc for when a swing happened; do not convert time yourself. time is in this chart's native bar-time units (same as draw_shape's point.time) — use these coordinates directly to anchor your own text annotation at this exact bar; this tool only finds WHERE, write your own narrative for WHAT to say.",
   };
 }
 
