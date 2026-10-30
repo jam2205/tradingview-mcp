@@ -45,6 +45,33 @@ describe('findSwingPoints()', () => {
     assert.equal(lows[0].price, 1.0);
   });
 
+  it('lists a high among the newest bars as provisional, not as a confirmed swing', async () => {
+    const bars = makeBars({ count: 21, highIndex: 18, lowIndex: null });
+    const result = await findSwingPoints({ window: 5, _deps: depsWithBars(bars) });
+    assert.equal(result.swings.some((s) => s.bar_index === 18), false);
+    const p = result.provisional.filter((s) => s.type === 'swing_high');
+    assert.equal(p.length, 1);
+    assert.equal(p[0].bar_index, 18);
+    assert.equal(p[0].price, 1.2);
+    assert.equal(p[0].bars_after, 2);
+    assert.equal(p[0].bars_needed, 5);
+  });
+
+  it('drops a provisional high as soon as a later bar goes above it', async () => {
+    const bars = makeBars({ count: 21, highIndex: 18, lowIndex: null });
+    bars[20].high = 1.3;
+    const result = await findSwingPoints({ window: 5, _deps: depsWithBars(bars) });
+    const highs = result.provisional.filter((s) => s.type === 'swing_high');
+    assert.deepEqual(highs.map((s) => s.bar_index), [20]);
+  });
+
+  it('confirms the same high once five bars have printed after it', async () => {
+    const bars = makeBars({ count: 24, highIndex: 18, lowIndex: null });
+    const result = await findSwingPoints({ window: 5, _deps: depsWithBars(bars) });
+    assert.ok(result.swings.some((s) => s.bar_index === 18));
+    assert.equal(result.provisional.some((s) => s.bar_index === 18), false);
+  });
+
   it('does not flag the swing-high bar as a swing low (or vice versa) when its other side is at baseline', async () => {
     const bars = makeBars({ count: 21, highIndex: 10, lowIndex: 15 });
     const result = await findSwingPoints({ window: 5, _deps: depsWithBars(bars) });

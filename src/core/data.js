@@ -232,10 +232,12 @@ export async function findSwingPoints({ count, window, _deps } = {}) {
       bar_count: bars.length,
       swing_count: 0,
       swings: [],
+      provisional: [],
       note: `Not enough bars (${bars.length}) for a ${w}-bar window on both sides — try a smaller window or request more history.`,
     };
   }
 
+  const timeUtc = (bar) => new Date(bar.time * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
   const swings = [];
   for (let i = w; i < bars.length - w; i++) {
     const pivotHigh = bars[i].high;
@@ -248,9 +250,21 @@ export async function findSwingPoints({ count, window, _deps } = {}) {
       if (isLow && bars[j].low <= pivotLow) isLow = false;
       if (!isHigh && !isLow) break;
     }
-    const time_utc = new Date(bars[i].time * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
-    if (isHigh) swings.push({ type: 'swing_high', bar_index: i, time: bars[i].time, time_utc, price: roundPrice(pivotHigh) });
-    if (isLow) swings.push({ type: 'swing_low', bar_index: i, time: bars[i].time, time_utc, price: roundPrice(pivotLow) });
+    if (isHigh) swings.push({ type: 'swing_high', bar_index: i, time: bars[i].time, time_utc: timeUtc(bars[i]), price: roundPrice(pivotHigh) });
+    if (isLow) swings.push({ type: 'swing_low', bar_index: i, time: bars[i].time, time_utc: timeUtc(bars[i]), price: roundPrice(pivotLow) });
+  }
+
+  // The newest `w` bars cannot be confirmed yet. Kept out of `swings`, which never changes once a bar is
+  // that old: a provisional swing can vanish, so it is for reading the chart now, never for a backtest.
+  const provisional = [];
+  const last = bars.length - 1;
+  for (let i = Math.max(w, bars.length - w); i <= last; i++) {
+    const others = [];
+    for (let j = i - w; j <= last; j++) if (j !== i) others.push(bars[j]);
+    const base = { bar_index: i, time: bars[i].time, time_utc: timeUtc(bars[i]) };
+    const progress = { bars_after: last - i, bars_needed: w };
+    if (others.every((b) => b.high < bars[i].high)) provisional.push({ type: 'swing_high', ...base, price: roundPrice(bars[i].high), ...progress });
+    if (others.every((b) => b.low > bars[i].low)) provisional.push({ type: 'swing_low', ...base, price: roundPrice(bars[i].low), ...progress });
   }
 
   return {
@@ -259,7 +273,8 @@ export async function findSwingPoints({ count, window, _deps } = {}) {
     bar_count: bars.length,
     swing_count: swings.length,
     swings,
-    note: "Read time_utc for when a swing happened; do not convert time yourself. time is in this chart's native bar-time units (same as draw_shape's point.time) — use these coordinates directly to anchor your own text annotation at this exact bar; this tool only finds WHERE, write your own narrative for WHAT to say.",
+    provisional,
+    note: "Read time_utc for when a swing happened; do not convert time yourself. time is in this chart's native bar-time units (same as draw_shape's point.time) — use these coordinates directly to anchor your own text annotation at this exact bar; this tool only finds WHERE, write your own narrative for WHAT to say. provisional lists swings among the newest bars, not yet confirmed: bars_after of bars_needed have printed, the newest may still be forming, and one can still vanish. Say so when quoting one, and never use them in a backtest.",
   };
 }
 
